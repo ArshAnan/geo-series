@@ -13,6 +13,7 @@ class GoogleSearchService {
     if (!this.customSearchApiKey || !this.customSearchEngineId) {
       console.warn('⚠️  Google Custom Search API keys not configured. Search features will be disabled.');
       console.warn('   Set GOOGLE_CUSTOM_SEARCH_API_KEY and GOOGLE_CUSTOM_SEARCH_ENGINE_ID in .env');
+      console.warn('   (or use GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID as alternative names)');
       this.enabled = false;
     } else {
       this.enabled = true;

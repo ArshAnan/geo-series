@@ -11,6 +11,7 @@ A system that monitors iMessage and SMS conversations between two people, logs t
 - **Automatic Notifications**: Sends key moments summaries to users after conversations end
 - **Smart Recommendations**: Automatically detects when users are planning activities (e.g., going out to eat) and provides restaurant/place recommendations via Google Search API
 - **AI-Powered Chat Responses**: Intelligent agent that responds to messages with personality and context awareness
+- **Proactive Conversation Initiation**: Automatically starts conversations based on shared interests when chats are inactive
 - **Non-invasive**: Only listens to events, doesn't modify or intercept messages
 - **JSON Storage**: Stores conversations and key moments in easy-to-parse JSON files
 
@@ -47,8 +48,12 @@ OPENAI_API_KEY=your-openai-api-key
 # Get your API key from: https://console.cloud.google.com/
 # Get your Engine ID from: https://programmablesearchengine.google.com/
 # See GOOGLE_API_SETUP.md for detailed setup instructions
+# You can use either naming convention:
 GOOGLE_CUSTOM_SEARCH_API_KEY=your-google-custom-search-api-key
 GOOGLE_CUSTOM_SEARCH_ENGINE_ID=your-search-engine-id
+# OR
+GOOGLE_SEARCH_API_KEY=your-google-custom-search-api-key
+GOOGLE_SEARCH_ENGINE_ID=your-search-engine-id
 ```
 
 ### 3. Configure Target Conversation
@@ -60,7 +65,7 @@ Edit `config.json`:
   "targetPhoneNumbers": ["+13175269229", "+13343284472"],
   "chatId": null,
   "batchingWindowMinutes": 5,
-  "openaiModel": "gpt-4",
+  "openaiModel": "gpt-4o",
   "minMessagesForAnalysis": 3,
   "senderPhoneNumber": "+16463458837",
   "conversationInactivityMinutes": 30,
@@ -71,11 +76,14 @@ Edit `config.json`:
 - `targetPhoneNumbers`: Array of phone numbers (E.164 format) to monitor
 - `chatId`: Optional - if set, only monitors this specific chat
 - `batchingWindowMinutes`: How long to wait before analyzing a batch of messages
-- `openaiModel`: OpenAI model to use (`gpt-4` or `gpt-3.5-turbo`)
+- `openaiModel`: OpenAI model to use (default: `gpt-4o`)
 - `minMessagesForAnalysis`: Minimum messages needed before analyzing
 - `senderPhoneNumber`: Phone number used to send messages (required for notifications)
 - `conversationInactivityMinutes`: Minutes of inactivity before sending key moments summary (default: 30)
 - `notificationPhoneNumber`: Optional - if set, key moments are sent to this number instead of the conversation chat
+- `conversationInitiatorIntervalMinutes`: How often to check for conversation initiation opportunities (default: 60 minutes)
+- `conversationInitiatorMinInactivityMinutes`: Minimum minutes of inactivity before initiating a conversation (default: 120 minutes)
+- `conversationInitiatorMaxFrequency`: Maximum number of conversation initiations per day per chat (default: 1)
 
 ## Usage
 
@@ -97,6 +105,7 @@ The system will:
 7. **Send key moments summaries to users** after conversations become inactive
 8. **Detect planning activities** and automatically provide restaurant/place recommendations via Google Search API
 9. **Generate AI responses** with personality and context awareness
+10. **Proactively initiate conversations** based on shared interests when chats are inactive
 
 **Note**: If you don't have Series API credentials, the system will work purely from Kafka events by filtering messages that match your target phone numbers. However, notifications will only be logged to console (not sent via API) if API credentials are not configured.
 
@@ -282,8 +291,63 @@ To enable recommendations:
    - Create a custom search engine
    - Get your API key and Engine ID
    - Add to `.env` as `GOOGLE_CUSTOM_SEARCH_API_KEY` and `GOOGLE_CUSTOM_SEARCH_ENGINE_ID`
+   - (Alternative: You can also use `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`)
 
 **Note**: At least one Google API key is recommended. If only Google Places API is configured, it will be used for all searches. If only Custom Search is configured, it will be used. If both are configured, Places API is preferred for restaurant/food searches.
+
+## Proactive Conversation Initiation
+
+The system includes an intelligent feature that proactively initiates conversations based on shared interests when chats have been inactive.
+
+### How It Works
+
+1. **Shared Interest Analysis**: The system continuously analyzes conversations to identify shared interests (anime, shows, hobbies, topics both users like)
+2. **Inactivity Detection**: Monitors chat activity and identifies when conversations have been inactive for a configured period
+3. **Natural Conversation Starters**: Uses OpenAI to generate natural, friendly conversation starters based on shared interests
+4. **Automatic Delivery**: Sends these messages proactively to re-engage users in conversations
+
+### Configuration
+
+The conversation initiator can be configured in `config.json`:
+
+- **`conversationInitiatorIntervalMinutes`**: How often the system checks for initiation opportunities (default: 60 minutes)
+- **`conversationInitiatorMinInactivityMinutes`**: Minimum minutes of inactivity before initiating (default: 120 minutes / 2 hours)
+- **`conversationInitiatorMaxFrequency`**: Maximum number of initiations per day per chat (default: 1)
+
+### Example Flow
+
+**For Sports Interests:**
+```
+[System detects shared interest: "Both users like basketball"]
+[Chat has been inactive for 2+ hours]
+[System searches for current NBA games/events]
+[System generates conversation starter with current context]
+Agent: "Hey! Did you catch the Lakers vs Warriors game last night? That ending was wild! 🏀"
+```
+
+**For Other Interests:**
+```
+[System detects shared interest: "Both users like Attack on Titan"]
+[Chat has been inactive for 2+ hours]
+[System generates conversation starter with current date context]
+Agent: "Hey! I was just thinking about Attack on Titan. Have you seen the latest episode? What did you think?"
+```
+
+### Features
+
+- **Smart Timing**: Only initiates when chats are truly inactive (configurable threshold)
+- **Interest-Based**: Uses actual shared interests extracted from previous conversations
+- **Current Events Integration**: References live games, current events, and recent news relevant to shared interests (e.g., "Did you catch the Lakers game last night?" for basketball fans)
+- **Natural Messages**: AI-generated conversation starters that feel authentic and engaging
+- **Frequency Limits**: Prevents spam by limiting initiations per day
+- **Duplicate Prevention**: Won't initiate about the same interest multiple times in one day
+
+### Requirements
+
+- Requires `OPENAI_API_KEY` to generate conversation starters
+- Requires `SERIES_API_BASE_URL` and `SERIES_API_KEY` to send messages
+- Requires existing key moments with shared interests (extracted from previous conversations)
+- **Optional**: `GOOGLE_CUSTOM_SEARCH_API_KEY` and `GOOGLE_CUSTOM_SEARCH_ENGINE_ID` (or `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`) for current events integration (sports games, live events, etc.). If not configured, the system will still generate starters with current date context but won't fetch live game scores/events.
 
 ## Architecture
 
@@ -297,6 +361,7 @@ The system consists of several microservices communicating via Kafka:
 6. **AI Response Service**: Generates intelligent responses with personality and context
 7. **Trigger Detector**: Analyzes conversations to detect when users need recommendations
 8. **Google Search Service**: Provides restaurant and place recommendations using Google APIs
+9. **Conversation Initiator Service**: Proactively initiates conversations based on shared interests when chats are inactive
 
 ## Key Moment Types
 
@@ -351,8 +416,17 @@ node check-status.js
 
 ### Recommendations not being sent
 
-- Verify `GOOGLE_PLACES_API_KEY` or `GOOGLE_CUSTOM_SEARCH_API_KEY` is set in `.env`
+- Verify `GOOGLE_PLACES_API_KEY`, `GOOGLE_CUSTOM_SEARCH_API_KEY`, or `GOOGLE_SEARCH_API_KEY` is set in `.env`
 - Check that the trigger detection is working (look for "🔍 Checking for triggers" in logs)
 - Ensure conversation context includes planning keywords (e.g., "going out to eat", "restaurant", "dinner")
 - Check cooldown period - recommendations won't be sent if one was sent in the last 5 minutes
 - Verify API client is enabled (check `SERIES_API_BASE_URL` and `SERIES_API_KEY`)
+
+### Conversation initiations not happening
+
+- Verify `OPENAI_API_KEY` is set correctly
+- Check that shared interests have been extracted (look in `logs/key-moments.json` for `type: "shared_interest"`)
+- Ensure chats have been inactive for the configured minimum period (`conversationInitiatorMinInactivityMinutes`)
+- Check that the maximum frequency hasn't been reached (default: 1 per day per chat)
+- Verify API client is enabled (check `SERIES_API_BASE_URL` and `SERIES_API_KEY`)
+- Look for "🔔 Conversation Initiator" messages in logs to see what the system is checking

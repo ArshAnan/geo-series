@@ -13,7 +13,7 @@ class OpenAIAnalyzer {
       apiKey: process.env.OPENAI_API_KEY
     });
 
-    this.model = config.openaiModel || 'gpt-4';
+    this.model = config.openaiModel || 'gpt-4o';
     this.processedBatches = new Set(); // Track processed batches to avoid duplicates
     this.onMomentExtractedCallback = null; // Callback for extracted moments
   }

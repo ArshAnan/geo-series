@@ -7,6 +7,7 @@ const OpenAIAnalyzer = require('./openai-analyzer');
 const StorageService = require('./storage-service');
 const NotificationService = require('./notification-service');
 const AIResponseService = require('./ai-response-service');
+const ConversationInitiatorService = require('./conversation-initiator-service');
 const config = require('./config.json');
 const fs = require('fs-extra');
 const path = require('path');
@@ -20,6 +21,7 @@ class ConversationLogger {
     this.storageService = null;
     this.notificationService = null;
     this.aiResponseService = null;
+    this.conversationInitiatorService = null;
     this.shutdownHandlers = [];
   }
 
@@ -122,6 +124,7 @@ class ConversationLogger {
       this.storageService = new StorageService();
       this.notificationService = new NotificationService();
       this.aiResponseService = new AIResponseService();
+      this.conversationInitiatorService = new ConversationInitiatorService();
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
       console.log('🔗 Setting up callbacks...');
@@ -169,7 +172,8 @@ class ConversationLogger {
         this.openaiAnalyzer.start(),
         this.storageService.start(),
         this.notificationService.start(),
-        this.aiResponseService.start()
+        this.aiResponseService.start(),
+        this.conversationInitiatorService.start()
       ]);
 
       console.log('\n✓ All services started successfully!');
@@ -229,6 +233,9 @@ class ConversationLogger {
     }
     if (this.aiResponseService) {
       stopPromises.push(this.aiResponseService.stop());
+    }
+    if (this.conversationInitiatorService) {
+      stopPromises.push(this.conversationInitiatorService.stop());
     }
 
     await Promise.all(stopPromises);

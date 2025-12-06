@@ -53,7 +53,7 @@ Edit `config.json`:
 {
   "targetPhoneNumbers": ["+16463458837", "+19294265300", "+12014927092"],
   "senderPhoneNumber": "+16463458837",
-  "openaiModel": "gpt-4"
+  "openaiModel": "gpt-4o"
 }
 ```
 

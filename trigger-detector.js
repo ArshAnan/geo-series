@@ -1,6 +1,7 @@
 // Trigger Detector - Analyzes conversation history to detect when users need recommendations
 require('dotenv').config();
 const OpenAI = require('openai');
+const config = require('./config.json');
 
 class TriggerDetector {
   constructor() {
@@ -12,7 +13,7 @@ class TriggerDetector {
       apiKey: process.env.OPENAI_API_KEY
     });
 
-    this.model = 'gpt-4';
+    this.model = config.openaiModel || 'gpt-4o';
     
     // Trigger patterns to detect
     this.triggerTypes = {
@@ -78,10 +79,8 @@ JSON Response:`;
         temperature: 0.3
       };
 
-      // Only add response_format if model supports it
-      const supportsJsonMode = this.model.startsWith('gpt-4') || 
-                               this.model.includes('gpt-3.5-turbo') ||
-                               ['gpt-4', 'gpt-4-turbo', 'gpt-4-turbo-preview', 'gpt-4-0125-preview', 'gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o', 'gpt-4o-mini'].some(m => this.model.includes(m));
+      // Only add response_format if model supports it (using same logic as openai-analyzer)
+      const supportsJsonMode = this.supportsJsonMode(this.model);
       
       if (supportsJsonMode) {
         requestParams.response_format = { type: 'json_object' };
@@ -162,6 +161,31 @@ JSON Response:`;
         reasoning: `Error: ${error.message}`
       };
     }
+  }
+
+  /**
+   * Check if model supports JSON response format
+   */
+  supportsJsonMode(model) {
+    // Models that support response_format: json_object
+    // Only these specific models support JSON mode - be conservative
+    const jsonModeModels = [
+      'gpt-4-turbo',
+      'gpt-4-turbo-preview',
+      'gpt-4-0125-preview',
+      'gpt-4-1106-preview',
+      'gpt-3.5-turbo-1106',
+      'gpt-4o',
+      'gpt-4o-mini'
+    ];
+    
+    // Check if model name exactly matches or contains a supported model identifier
+    const modelLower = model.toLowerCase();
+    return jsonModeModels.some(supported => {
+      const supportedLower = supported.toLowerCase();
+      // Exact match or model contains the supported identifier
+      return modelLower === supportedLower || modelLower.includes(supportedLower);
+    });
   }
 
   /**

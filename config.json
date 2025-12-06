@@ -2,9 +2,12 @@
   "targetPhoneNumbers": ["+16463458837", "+19294265300", "+12014927092"],
   "chatId": null,
   "batchingWindowMinutes": 0.25,
-  "openaiModel": "gpt-4",
+  "openaiModel": "gpt-4o",
   "minMessagesForAnalysis": 3,
   "senderPhoneNumber": "+16463458837",
   "conversationInactivityMinutes": 30,
-  "notificationPhoneNumber": null
+  "notificationPhoneNumber": null,
+  "conversationInitiatorIntervalMinutes": 2,
+  "conversationInitiatorMinInactivityMinutes": 2,
+  "conversationInitiatorMaxFrequency": 1
 }

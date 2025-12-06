@@ -18,7 +18,7 @@ class AIResponseService {
       apiKey: process.env.OPENAI_API_KEY
     });
 
-    this.model = config.openaiModel || 'gpt-4';
+    this.model = config.openaiModel || 'gpt-4o';
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
     
