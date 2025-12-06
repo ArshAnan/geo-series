@@ -1,12 +1,13 @@
 // Task Analyzer Service - Analyzes conversations to extract tasks, goals, and scheduled events
 require('dotenv').config();
 const OpenAI = require('openai');
+const SeriesAPIClient = require('./api-client');
 const config = require('./config.json');
 const fs = require('fs-extra');
 const path = require('path');
 
 class TaskAnalyzerService {
-  constructor() {
+  constructor(targetChatId = null) {
     if (!process.env.OPENAI_API_MY_KEY) {
       throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
@@ -16,6 +17,8 @@ class TaskAnalyzerService {
     });
 
     this.model = config.openaiModel || 'gpt-4o';
+    this.apiClient = new SeriesAPIClient();
+    this.targetChatId = targetChatId || config.chatId; // Only analyze target chat ID
     this.tasksFile = path.join(__dirname, 'logs', 'tasks.json');
     this.onTaskExtractedCallback = null;
     
@@ -272,6 +275,7 @@ Return ONLY valid JSON, no other text. Format:
 
   /**
    * Process a conversation batch to extract tasks
+   * Fetches all unprocessed messages from API for better context
    */
   async processBatch(conversationBatch, keyMoments = []) {
     try {
@@ -279,7 +283,50 @@ Return ONLY valid JSON, no other text. Format:
       console.log(`   Messages in batch: ${conversationBatch.messages.length}`);
       console.log(`   Key moments available: ${keyMoments.length}`);
 
-      const tasks = await this.analyzeConversationForTasks(conversationBatch, keyMoments);
+      // Fetch all unprocessed messages from API for better context
+      let allMessages = conversationBatch.messages;
+      if (this.apiClient.enabled && this.targetChatId && String(conversationBatch.chatId) === String(this.targetChatId)) {
+        try {
+          console.log(`   📥 Fetching all unprocessed messages from API for better task analysis...`);
+          const messagesResponse = await this.apiClient.getChatMessages(conversationBatch.chatId, null, 25, false, true);
+          const apiMessages = messagesResponse?.data || messagesResponse || [];
+          
+          if (Array.isArray(apiMessages) && apiMessages.length > 0) {
+            // Convert API messages to batch format
+            const apiMessagesFormatted = apiMessages.map(msg => ({
+              chatId: conversationBatch.chatId,
+              messageId: String(msg.id || msg.message_id),
+              fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
+              text: msg.text || '',
+              sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
+              chatHandles: msg.chat_handles || [],
+              attachments: msg.attachments || [],
+              isRead: msg.is_read || false,
+              service: msg.service || 'iMessage'
+            }));
+
+            // Combine batch messages with API messages, avoiding duplicates
+            const batchMessageIds = new Set(conversationBatch.messages.map(m => m.messageId));
+            const uniqueApiMessages = apiMessagesFormatted.filter(m => !batchMessageIds.has(m.messageId));
+            
+            // Merge and sort by timestamp
+            allMessages = [...conversationBatch.messages, ...uniqueApiMessages]
+              .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+            
+            console.log(`   ✅ Using ${allMessages.length} total messages (${conversationBatch.messages.length} from batch + ${uniqueApiMessages.length} from API)`);
+          }
+        } catch (error) {
+          console.warn(`   ⚠️  Error fetching messages from API, using batch only:`, error.message);
+        }
+      }
+
+      // Create enhanced batch with all messages
+      const enhancedBatch = {
+        ...conversationBatch,
+        messages: allMessages
+      };
+
+      const tasks = await this.analyzeConversationForTasks(enhancedBatch, keyMoments);
 
       if (tasks.length === 0) {
         console.log(`   ⚠️  No tasks extracted for chat ${conversationBatch.chatId}`);

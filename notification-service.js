@@ -1,9 +1,8 @@
 // Notification Service - Sends key moments to users after conversations
 require('dotenv').config();
 const SeriesAPIClient = require('./api-client');
-const fs = require('fs-extra');
-const path = require('path');
 const config = require('./config.json');
+const DatabaseService = require('./database-service');
 
 class NotificationService {
   constructor() {
@@ -11,36 +10,25 @@ class NotificationService {
     this.conversationActivity = new Map(); // chatId -> { lastMessageTime, timer, keyMoments }
     this.inactivityTimeout = (config.conversationInactivityMinutes || 30) * 60 * 1000; // Default 30 minutes
     this.onKeyMomentCallback = null;
-    this.sentMomentIds = new Set(); // Track which moments we've already sent
-    this.sentMomentsFile = path.join(__dirname, 'logs', 'sent-moments.json');
+    this.sentMomentIds = new Set(); // Track which moments we've already sent (in-memory cache)
+    this.db = new DatabaseService();
     
-    // Load sent moments from file
-    this.loadSentMoments();
+    // Note: MongoDB connection will happen in start() method
   }
 
   async loadSentMoments() {
     try {
-      if (await fs.pathExists(this.sentMomentsFile)) {
-        const data = await fs.readJson(this.sentMomentsFile);
-        this.sentMomentIds = new Set(data.sentMomentIds || []);
-        if (this.sentMomentIds.size > 0) {
-          console.log(`Loaded ${this.sentMomentIds.size} sent moment IDs`);
-        }
-      }
+      // Load from MongoDB and cache in memory
+      await this.db.connect();
+      // Note: We'll check MongoDB directly in isMomentSent, this is just for initial cache
     } catch (error) {
       console.warn('Could not load sent moments:', error.message);
     }
   }
 
   async saveSentMoments() {
-    try {
-      await fs.ensureDir(path.dirname(this.sentMomentsFile));
-      await fs.writeJson(this.sentMomentsFile, {
-        sentMomentIds: Array.from(this.sentMomentIds)
-      }, { spaces: 2 });
-    } catch (error) {
-      console.warn('Could not save sent moments:', error.message);
-    }
+    // No longer needed - MongoDB handles persistence
+    // This method kept for compatibility but does nothing
   }
 
   setCallback(onKeyMoment) {
@@ -78,7 +66,7 @@ class NotificationService {
   /**
    * Add a key moment to a conversation
    */
-  addKeyMoment(moment) {
+  async addKeyMoment(moment) {
     const chatId = moment.chatId;
     
     if (!this.conversationActivity.has(chatId)) {
@@ -94,8 +82,9 @@ class NotificationService {
     // Create a unique ID for this moment
     const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
     
-    // Check if we've already sent this moment
-    if (this.sentMomentIds.has(momentId)) {
+    // Check if we've already sent this moment (check MongoDB)
+    const isSent = await this.db.isMomentSent(momentId);
+    if (isSent) {
       console.log(`Skipping already sent moment: ${moment.description}`);
       return;
     }
@@ -141,12 +130,11 @@ class NotificationService {
       }
 
       // Mark all moments as sent to avoid duplicate notifications
-      allMomentsFromStorage.forEach(moment => {
+      for (const moment of allMomentsFromStorage) {
         const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-        this.sentMomentIds.add(momentId);
-      });
-
-      await this.saveSentMoments();
+        await this.db.markMomentSent(momentId, chatId);
+        this.sentMomentIds.add(momentId); // Cache in memory too
+      }
 
       console.log(`✅ Sent all ${allMomentsFromStorage.length} key moments from conversation history to user for chat ${chatId}`);
     } catch (error) {
@@ -307,14 +295,8 @@ class NotificationService {
    * Get ALL key moments from storage for a chat (regardless of sent status)
    */
   async getAllMomentsFromStorage(chatId) {
-    const keyMomentsFile = path.join(__dirname, 'logs', 'key-moments.json');
-    if (!(await fs.pathExists(keyMomentsFile))) {
-      return [];
-    }
-
     try {
-      const allMoments = await fs.readJson(keyMomentsFile);
-      const chatMoments = allMoments.filter(m => m.chatId === chatId);
+      const chatMoments = await this.db.getKeyMomentsByChat(chatId);
       
       // Sort by date
       chatMoments.sort((a, b) => {
@@ -336,28 +318,39 @@ class NotificationService {
   async getPendingMomentsFromStorage(chatId) {
     const allMoments = await this.getAllMomentsFromStorage(chatId);
     
-    return allMoments.filter(moment => {
+    const pending = [];
+    for (const moment of allMoments) {
       const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-      return !this.sentMomentIds.has(momentId);
-    });
+      const isSent = await this.db.isMomentSent(momentId);
+      if (!isSent) {
+        pending.push(moment);
+      }
+    }
+    return pending;
   }
 
   /**
    * Get all pending moments for a chat (from memory)
    */
-  getPendingMoments(chatId) {
+  async getPendingMoments(chatId) {
     const activity = this.conversationActivity.get(chatId);
     if (!activity) {
       return [];
     }
     
-    return activity.keyMoments.filter(moment => {
+    const pending = [];
+    for (const moment of activity.keyMoments) {
       const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-      return !this.sentMomentIds.has(momentId);
-    });
+      const isSent = await this.db.isMomentSent(momentId);
+      if (!isSent) {
+        pending.push(moment);
+      }
+    }
+    return pending;
   }
 
   async start() {
+    await this.db.connect();
     console.log('Notification service started');
     console.log(`Inactivity timeout: ${config.conversationInactivityMinutes || 30} minutes`);
     console.log(`API client enabled: ${this.apiClient.enabled}`);

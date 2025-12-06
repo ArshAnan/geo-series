@@ -8,9 +8,10 @@ const path = require('path');
 const TriggerDetector = require('./trigger-detector');
 const GoogleSearchService = require('./google-search-service');
 const StorageService = require('./storage-service');
+const DatabaseService = require('./database-service');
 
 class AIResponseService {
-  constructor() {
+  constructor(targetChatId = null) {
     if (!process.env.OPENAI_API_MY_KEY) {
       throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
@@ -22,6 +23,7 @@ class AIResponseService {
     this.model = config.openaiModel || 'gpt-4o';
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
+    this.targetChatId = targetChatId || config.chatId; // Only monitor target chat ID
     
     // Track conversation history per chat for context
     this.conversationHistory = new Map(); // chatId -> array of messages
@@ -33,6 +35,7 @@ class AIResponseService {
     this.triggerDetector = new TriggerDetector();
     this.googleSearchService = new GoogleSearchService();
     this.storageService = new StorageService();
+    this.db = new DatabaseService();
     
     // Track if we've sent recommendations recently to avoid spam
     this.lastRecommendationTime = new Map(); // chatId -> timestamp
@@ -52,64 +55,89 @@ class AIResponseService {
   }
 
   /**
-   * Load conversation history from stored conversations
-   * This merges with existing history, avoiding duplicates
+   * Load conversation history from API
+   * Fetches conversations on-demand from the Series API instead of MongoDB
    */
   async loadConversationHistory() {
+    if (!this.apiClient.enabled) {
+      console.warn('API client not enabled. Cannot load conversation history from API.');
+      return;
+    }
+
     try {
-      const conversationsFile = path.join(__dirname, 'logs', 'conversations.json');
-      if (await fs.pathExists(conversationsFile)) {
-        const conversations = await fs.readJson(conversationsFile);
-        
-        // Track which messages we've already loaded to avoid duplicates
-        const loadedMessageIds = new Set();
-        this.conversationHistory.forEach((messages) => {
-          messages.forEach(msg => {
-            if (msg.messageId) {
-              loadedMessageIds.add(msg.messageId);
-            }
-          });
+      // Only load conversation history for the target chat ID if configured
+      if (!this.targetChatId) {
+        console.log('📚 No target chat ID configured. Skipping conversation history load.');
+        return;
+      }
+
+      const chatId = String(this.targetChatId);
+      console.log(`   🎯 Loading conversation history only for target chat: ${chatId}`);
+
+      // Track which messages we've already loaded to avoid duplicates
+      const loadedMessageIds = new Set();
+      this.conversationHistory.forEach((messages) => {
+        messages.forEach(msg => {
+          if (msg.messageId) {
+            loadedMessageIds.add(msg.messageId);
+          }
         });
+      });
+      
+      let newMessagesCount = 0;
+
+      try {
+        // Fetch ALL pages to get all unprocessed messages
+        const messagesResponse = await this.apiClient.getChatMessages(chatId, null, 25, false, true);
+        // API response structure: { data: [...] } or just [...]
+        const messages = messagesResponse?.data || messagesResponse || [];
         
-        let newMessagesCount = 0;
-        
-        // Group conversations by chatId
-        conversations.forEach(msg => {
+        if (!Array.isArray(messages)) {
+          console.warn(`   ⚠️  Unexpected API response format for chat ${chatId}`);
+          return;
+        }
+
+        if (!this.conversationHistory.has(chatId)) {
+          this.conversationHistory.set(chatId, []);
+        }
+
+        // Convert API messages to conversation history format
+        messages.forEach(msg => {
+          const messageId = String(msg.id || msg.message_id);
           // Skip if we've already loaded this message
-          if (loadedMessageIds.has(msg.messageId)) {
+          if (loadedMessageIds.has(messageId)) {
             return;
           }
           
-          if (!this.conversationHistory.has(msg.chatId)) {
-            this.conversationHistory.set(msg.chatId, []);
-          }
-          
-          this.conversationHistory.get(msg.chatId).push({
-            role: this.isFromSender(msg.fromPhone) ? 'assistant' : 'user',
+          const fromPhone = msg.sent_from || msg.from_phone || msg.fromPhone;
+          this.conversationHistory.get(chatId).push({
+            role: this.isFromSender(fromPhone) ? 'assistant' : 'user',
             content: msg.text || '',
-            timestamp: msg.sentAt,
-            messageId: msg.messageId // Store messageId to track duplicates
+            timestamp: msg.sent_at || msg.sentAt || msg.timestamp,
+            messageId: messageId
           });
           
-          loadedMessageIds.add(msg.messageId);
+          loadedMessageIds.add(messageId);
           newMessagesCount++;
         });
-        
-        // Sort by timestamp
-        this.conversationHistory.forEach((messages, chatId) => {
-          messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          // Keep more messages in memory for better recommendations (increased from 100 to 200)
-          if (messages.length > 200) {
-            messages.splice(0, messages.length - 200);
-          }
-        });
-        
-        if (newMessagesCount > 0) {
-          console.log(`📚 Reloaded conversation history: ${newMessagesCount} new messages across ${this.conversationHistory.size} chats`);
+      } catch (error) {
+        console.warn(`   ⚠️  Error fetching messages for chat ${chatId}:`, error.message);
+      }
+      
+      // Sort by timestamp
+      this.conversationHistory.forEach((messages, chatId) => {
+        messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        // Keep more messages in memory for better recommendations (increased from 100 to 200)
+        if (messages.length > 200) {
+          messages.splice(0, messages.length - 200);
         }
+      });
+      
+      if (newMessagesCount > 0) {
+        console.log(`📚 Reloaded conversation history from API: ${newMessagesCount} new messages for target chat ${chatId}`);
       }
     } catch (error) {
-      console.warn('Could not load conversation history:', error.message);
+      console.warn('Could not load conversation history from API:', error.message);
     }
   }
 
@@ -206,35 +234,47 @@ class AIResponseService {
 
   /**
    * Get conversation context for a chat
-   * Optionally loads directly from file for more complete history
+   * Fetches from API if needed for more complete history
    */
-  async getConversationContext(chatId, maxMessages = 20, loadFromFile = false) {
+  async getConversationContext(chatId, maxMessages = 20, loadFromApi = false) {
     let history = this.conversationHistory.get(chatId) || [];
     
-    // If we need more history or want to load from file, load directly from conversations.json
-    if (loadFromFile || history.length < maxMessages) {
+    // If we need more history or want to load from API, fetch directly
+    if (loadFromApi || history.length < maxMessages) {
+      if (!this.apiClient.enabled) {
+        console.warn('API client not enabled. Cannot fetch conversation context from API.');
+        return history.slice(-maxMessages);
+      }
+
       try {
-        const conversationsFile = path.join(__dirname, 'logs', 'conversations.json');
-        if (await fs.pathExists(conversationsFile)) {
-          const conversations = await fs.readJson(conversationsFile);
-          // Filter for this chat and convert to conversation history format
-          const chatMessages = conversations
-            .filter(msg => msg.chatId === chatId)
-            .map(msg => ({
-              role: this.isFromSender(msg.fromPhone) ? 'assistant' : 'user',
-              content: msg.text || '',
-              timestamp: msg.sentAt,
-              messageId: msg.messageId
-            }))
+        // Fetch ALL pages to get all unprocessed messages
+        const messagesResponse = await this.apiClient.getChatMessages(chatId, null, 25, false, true);
+        // API response structure: { data: [...] } or just [...]
+        const messages = messagesResponse?.data || messagesResponse || [];
+        
+        if (Array.isArray(messages)) {
+          // Convert API messages to conversation history format
+          const chatMessages = messages
+            .map(msg => {
+              const fromPhone = msg.sent_from || msg.from_phone || msg.fromPhone;
+              return {
+                role: this.isFromSender(fromPhone) ? 'assistant' : 'user',
+                content: msg.text || '',
+                timestamp: msg.sent_at || msg.sentAt || msg.timestamp,
+                messageId: String(msg.id || msg.message_id)
+              };
+            })
             .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
           
-          // Use file history if it's more complete or if explicitly requested
-          if (loadFromFile || chatMessages.length > history.length) {
+          // Use API history if it's more complete or if explicitly requested
+          if (loadFromApi || chatMessages.length > history.length) {
             history = chatMessages;
+            // Update in-memory cache
+            this.conversationHistory.set(chatId, chatMessages);
           }
         }
       } catch (error) {
-        console.warn('Error loading conversation context from file:', error.message);
+        console.warn('Error loading conversation context from API:', error.message);
       }
     }
     
@@ -292,8 +332,11 @@ class AIResponseService {
         return { shouldRespond: false, reason: 'too_frequent' };
       }
 
-      // Build context for analysis (conversationContext is already loaded from file)
-      const recentMessages = conversationContext.slice(-10);
+      // Build context for analysis - use ALL unprocessed messages
+      const recentMessages = conversationContext.slice(-20); // Use last 20 messages for context
+      if (recentMessages.length === 0) {
+        return { shouldRespond: false, reason: 'no_message', confidence: 0 };
+      }
       const conversationText = recentMessages.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -398,8 +441,7 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         { role: 'system', content: systemPrompt }
       ];
 
-      // Add conversation history (last 15 messages for better context)
-      // The conversationContext already includes the current message since we updated history first
+      // Add conversation history - use ALL unprocessed messages (last 15 for context)
       const recentContext = conversationContext.slice(-15);
       recentContext.forEach(msg => {
         messages.push({
@@ -408,10 +450,7 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         });
       });
 
-      // The current message should already be in recentContext, but add it explicitly if needed
-      // (it should be the last message in recentContext since we updated history first)
-
-      console.log(`📝 Generating response with ${messages.length - 1} context messages (including current message)`);
+      console.log(`📝 Generating response using ${recentContext.length} messages for context`);
 
       // Generate response
       const response = await this.openai.chat.completions.create({
@@ -462,10 +501,10 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
       console.log(`🤖 AI Response Service: Processing message ${message.messageId} from ${message.fromPhone}`);
 
-      // Get conversation context (now includes the current message we just added)
-      // Load from file to ensure we have all logged conversations for better recommendations
-      const context = await this.getConversationContext(message.chatId, 50, true);
-      console.log(`📚 Using ${context.length} messages for context (loaded from conversations.json)`);
+      // Get conversation context - fetch ALL unprocessed messages from API
+      // Load from API to get all messages, not just the current one
+      const context = await this.getConversationContext(message.chatId, 100, true);
+      console.log(`📚 Using ${context.length} unprocessed messages for context (loaded from API)`);
       
       // Check for triggers that require recommendations
       const triggerResult = await this.checkForTriggers(message, context);
@@ -518,8 +557,10 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
             console.log(`   Chat ID: ${message.chatId}`);
             console.log(`   From: ${this.senderPhoneNumber}`);
             console.log(`   Response: "${responseText}"`);
-            if (result && result.id) {
-              console.log(`   Message ID: ${result.id}`);
+            // API response structure: { data: { id, ... } }
+            const messageId = result?.data?.id || result?.id;
+            if (messageId) {
+              console.log(`   Message ID: ${messageId}`);
             }
             
             // Update conversation history with our response
@@ -529,7 +570,7 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
             }, true);
             
             // Store AI response to conversations.json for better recommendations
-            await this.storeAIResponse(message.chatId, responseText, result.id);
+            await this.storeAIResponse(message.chatId, responseText, messageId);
             
             // Update last response time
             this.lastResponseTime.set(message.chatId, Date.now());
@@ -645,9 +686,9 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       console.log(`   Query: "${triggerResult.searchQuery}"`);
       
       // Get full conversation history for better context
-      // Load directly from file to ensure we have ALL logged conversations for recommendations
+      // Load directly from API to ensure we have ALL conversations for recommendations
       const fullHistory = await this.getConversationContext(message.chatId, 100, true);
-      console.log(`📚 Using ${fullHistory.length} messages from conversations.json for recommendation context`);
+      console.log(`📚 Using ${fullHistory.length} messages from API for recommendation context`);
       const preferences = this.extractUserPreferences(fullHistory);
       
       // Enhance search query with preferences if available
@@ -759,13 +800,15 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
           }, true);
           
           // Store recommendation to conversations.json for better future recommendations
-          await this.storeAIResponse(message.chatId, recommendationsMessage, result.id);
+          // API response structure: { data: { id, ... } }
+          const messageId = result?.data?.id || result?.id;
+          await this.storeAIResponse(message.chatId, recommendationsMessage, messageId);
           
           // Log the recommendation for future reference
           console.log(`📝 Logged recommendation: ${triggerResult.triggerType} - "${enhancedQuery}" (location: ${location || 'none'})`);
           
-          if (result && result.id) {
-            console.log(`   Message ID: ${result.id}`);
+          if (messageId) {
+            console.log(`   Message ID: ${messageId}`);
           }
           
           return true;
@@ -816,15 +859,14 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       console.warn('⚠️  API client not enabled. AI responses will be logged but not sent.');
     }
 
-    // Periodically reload conversation history from storage to catch any messages
-    // that might have been stored by other processes or missed
+    // Periodically reload conversation history from API to catch any new messages
     // Reload more frequently to ensure recommendations use latest conversations
     setInterval(async () => {
       try {
         await this.loadConversationHistory();
-        console.log(`🔄 Reloaded conversation history from storage (periodic refresh)`);
+        console.log(`🔄 Reloaded conversation history from API (periodic refresh)`);
       } catch (error) {
-        console.warn('Error reloading conversation history:', error.message);
+        console.warn('Error reloading conversation history from API:', error.message);
       }
     }, 2 * 60 * 1000); // Reload every 2 minutes (increased frequency)
   }
@@ -850,9 +892,9 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         createdAt: new Date().toISOString()
       };
       
-      // Store via storage service
+      // Store via storage service (for tracking purposes, but conversations are fetched from API)
       await this.storageService.storeConversation(aiMessage);
-      console.log(`📝 Stored AI response to conversations.json for better recommendations`);
+      console.log(`📝 Stored AI response for tracking (conversations fetched from API)`);
     } catch (error) {
       console.error('Error storing AI response:', error);
       // Don't throw - this is not critical for functionality

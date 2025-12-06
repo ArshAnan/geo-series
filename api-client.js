@@ -88,14 +88,80 @@ class SeriesAPIClient {
 
   /**
    * Get messages for a chat
+   * Supports pagination to get latest messages or all messages
+   * @param {string} chatId - The chat ID
+   * @param {number} page - Page number (default: null)
+   * @param {number} perPage - Messages per page (default: 25)
+   * @param {boolean} getLatest - If true, fetches the last page to get latest messages
+   * @param {boolean} getAllPages - If true, fetches ALL pages to get all unprocessed messages
    */
-  async getChatMessages(chatId) {
+  async getChatMessages(chatId, page = null, perPage = 25, getLatest = true, getAllPages = false) {
     if (!this.enabled) {
       throw new Error('API client is not enabled. Set SERIES_API_BASE_URL and SERIES_API_KEY in .env');
     }
     try {
-      const response = await this.client.get(`/api/chats/${chatId}/chat_messages`);
-      return response.data;
+      // First, get the first page to check pagination metadata
+      const firstPageResponse = await this.client.get(`/api/chats/${chatId}/chat_messages`, {
+        params: { page: 1, per_page: perPage }
+      });
+      
+      const firstPageData = firstPageResponse.data;
+      const meta = firstPageData?.meta || firstPageResponse.data?.meta;
+      const totalPages = meta?.total_pages || meta?.last_page || meta?.pages;
+      
+      // If we want all pages, fetch all of them
+      if (getAllPages && totalPages && totalPages > 1) {
+        console.log(`   📄 Found ${totalPages} pages of messages, fetching ALL pages for unprocessed messages...`);
+        const allMessages = [];
+        
+        // Get messages from first page
+        const firstPageMessages = firstPageData?.data || firstPageData || [];
+        if (Array.isArray(firstPageMessages)) {
+          allMessages.push(...firstPageMessages);
+        }
+        
+        // Fetch remaining pages
+        for (let p = 2; p <= totalPages; p++) {
+          try {
+            const pageResponse = await this.client.get(`/api/chats/${chatId}/chat_messages`, {
+              params: { page: p, per_page: perPage }
+            });
+            const pageMessages = pageResponse.data?.data || pageResponse.data || [];
+            if (Array.isArray(pageMessages)) {
+              allMessages.push(...pageMessages);
+            }
+          } catch (error) {
+            console.warn(`   ⚠️  Error fetching page ${p}:`, error.message);
+            // Continue with other pages
+          }
+        }
+        
+        // Return all messages in the same format
+        return {
+          data: allMessages,
+          meta: meta
+        };
+      }
+      
+      // If we want latest messages and there are multiple pages, fetch the last page
+      if (getLatest && totalPages && totalPages > 1) {
+        console.log(`   📄 Found ${totalPages} pages of messages, fetching last page for latest messages...`);
+        const lastPageResponse = await this.client.get(`/api/chats/${chatId}/chat_messages`, {
+          params: { page: totalPages, per_page: perPage }
+        });
+        return lastPageResponse.data;
+      }
+      
+      // If page is specified, use it
+      if (page !== null) {
+        const response = await this.client.get(`/api/chats/${chatId}/chat_messages`, {
+          params: { page, per_page: perPage }
+        });
+        return response.data;
+      }
+      
+      // Otherwise return first page
+      return firstPageData;
     } catch (error) {
       console.error('Error getting chat messages:', error.response?.data || error.message);
       throw error;
@@ -177,10 +243,24 @@ class SeriesAPIClient {
         payload.send_from = sendFromPhoneNumber;
       }
 
+      console.log(`   📡 API Request: POST /api/chats/${chatId}/chat_messages`);
+      console.log(`   📤 Payload: ${JSON.stringify(payload, null, 2)}`);
+      
       const response = await this.client.post(`/api/chats/${chatId}/chat_messages`, payload);
+      
+      console.log(`   📥 API Response Status: ${response.status}`);
+      console.log(`   📥 API Response Data: ${JSON.stringify(response.data, null, 2)}`);
+      
       return response.data;
     } catch (error) {
-      console.error('Error sending message:', error.response?.data || error.message);
+      console.error('   ❌ Error sending message:', error.message);
+      if (error.response) {
+        console.error(`   ❌ Response Status: ${error.response.status}`);
+        console.error(`   ❌ Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
+      }
+      if (error.request) {
+        console.error(`   ❌ Request made but no response:`, error.request);
+      }
       throw error;
     }
   }

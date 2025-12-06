@@ -127,9 +127,9 @@ class ConversationLogger {
       this.openaiAnalyzer = new OpenAIAnalyzer();
       this.storageService = new StorageService();
       this.notificationService = new NotificationService();
-      this.aiResponseService = new AIResponseService();
-      this.conversationInitiatorService = new ConversationInitiatorService();
-      this.taskAnalyzerService = new TaskAnalyzerService();
+      this.aiResponseService = new AIResponseService(chatId);
+      this.conversationInitiatorService = new ConversationInitiatorService(chatId);
+      this.taskAnalyzerService = new TaskAnalyzerService(chatId);
       this.taskSchedulerService = new TaskSchedulerService();
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
@@ -203,7 +203,7 @@ class ConversationLogger {
         async (moment) => {
           await this.storageService.storeKeyMoment(moment);
           // Add to notification service for sending to user
-          this.notificationService.addKeyMoment(moment);
+          await this.notificationService.addKeyMoment(moment);
           
           // Track moment for current batch (for task analyzer)
           if (!currentBatchMoments.has(moment.chatId)) {

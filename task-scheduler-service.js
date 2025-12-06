@@ -2,47 +2,31 @@
 require('dotenv').config();
 const SeriesAPIClient = require('./api-client');
 const config = require('./config.json');
-const fs = require('fs-extra');
-const path = require('path');
 const GoogleSearchService = require('./google-search-service');
+const DatabaseService = require('./database-service');
 
 class TaskSchedulerService {
   constructor() {
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
-    this.tasksFile = path.join(__dirname, 'logs', 'tasks.json');
+    this.db = new DatabaseService();
     this.googleSearchService = new GoogleSearchService();
     
     // Task check interval (check every minute)
     this.checkInterval = (config.taskSchedulerCheckIntervalSeconds || 60) * 1000;
     this.reminderTimeWindow = (config.taskReminderTimeWindowMinutes || 5) * 60 * 1000;
     this.checkIntervalId = null;
-    
-    // Initialize files
-    this.initializeFiles();
-  }
-
-  async initializeFiles() {
-    try {
-      await fs.ensureDir(path.dirname(this.tasksFile));
-      if (!(await fs.pathExists(this.tasksFile))) {
-        await fs.writeJson(this.tasksFile, [], { spaces: 2 });
-      }
-    } catch (error) {
-      console.error('Error initializing task scheduler files:', error);
-    }
+    this.hasLoggedNoTasks = false; // Track if we've logged the "no tasks" message
+    this.lastMatchdayCheckDate = null; // Track when we last checked matchday tasks
+    this.lastMatchdayTaskCount = 0; // Track how many matchday tasks we had last check
   }
 
   /**
-   * Load all tasks from storage
+   * Load all tasks from MongoDB
    */
   async loadTasks() {
     try {
-      if (await fs.pathExists(this.tasksFile)) {
-        const tasks = await fs.readJson(this.tasksFile);
-        return tasks.filter(t => t.status === 'active') || [];
-      }
-      return [];
+      return await this.db.getAllActiveTasks();
     } catch (error) {
       console.error('Error loading tasks:', error);
       return [];
@@ -54,17 +38,7 @@ class TaskSchedulerService {
    */
   async storeTask(task) {
     try {
-      const tasks = await fs.readJson(this.tasksFile);
-      
-      // Check if task already exists
-      const exists = tasks.some(t => t.id === task.id);
-      if (exists) {
-        console.log(`Task already exists: ${task.title}`);
-        return;
-      }
-
-      tasks.push(task);
-      await fs.writeJson(this.tasksFile, tasks, { spaces: 2 });
+      await this.db.storeTask(task);
       console.log(`✅ Stored task: ${task.title} (${task.category})`);
     } catch (error) {
       console.error('Error storing task:', error);
@@ -76,16 +50,7 @@ class TaskSchedulerService {
    */
   async updateTask(taskId, updates) {
     try {
-      const tasks = await fs.readJson(this.tasksFile);
-      const taskIndex = tasks.findIndex(t => t.id === taskId);
-      
-      if (taskIndex === -1) {
-        console.warn(`Task not found: ${taskId}`);
-        return;
-      }
-
-      tasks[taskIndex] = { ...tasks[taskIndex], ...updates };
-      await fs.writeJson(this.tasksFile, tasks, { spaces: 2 });
+      await this.db.updateTask(taskId, updates);
     } catch (error) {
       console.error('Error updating task:', error);
     }
@@ -489,6 +454,12 @@ class TaskSchedulerService {
       const tasks = await this.loadTasks();
       
       if (tasks.length === 0) {
+        // Only log this once per startup to avoid spam
+        if (!this.hasLoggedNoTasks) {
+          console.log('   No active tasks found. Waiting for tasks to be created from conversations...');
+          console.log('   💡 Tasks are automatically created when conversations contain task-worthy content.');
+          this.hasLoggedNoTasks = true;
+        }
         return;
       }
 
@@ -508,10 +479,31 @@ class TaskSchedulerService {
       console.log(`\n⏰ Task Scheduler: Checking ${tasks.length} active task(s)...`);
       console.log(`   Matchday tasks: ${matchdayTasks.length}, Other tasks: ${otherTasks.length}`);
 
+      // Reset check date if matchday tasks were deleted (count changed from >0 to 0)
+      // or if new matchday tasks were added (count increased)
+      const matchdayTaskCountChanged = this.lastMatchdayTaskCount !== matchdayTasks.length;
+      if (matchdayTaskCountChanged) {
+        if (matchdayTasks.length === 0) {
+          // All matchday tasks deleted - reset check date
+          this.lastMatchdayCheckDate = null;
+          this.lastMatchdayTaskCount = 0;
+          console.log(`   🔄 Matchday tasks deleted - resetting check date`);
+        } else if (this.lastMatchdayTaskCount === 0 && matchdayTasks.length > 0) {
+          // New matchday tasks added - allow check
+          this.lastMatchdayTaskCount = matchdayTasks.length;
+          console.log(`   🔄 New matchday tasks detected (${matchdayTasks.length}) - will check`);
+        } else {
+          // Count changed but not zero - update count
+          this.lastMatchdayTaskCount = matchdayTasks.length;
+        }
+      }
+
       // Check matchday tasks once per day (to avoid excessive Google searches)
-      if (matchdayTasks.length > 0 && isNewDay) {
+      // Only skip if: there are matchday tasks AND we already checked today AND count hasn't changed
+      if (matchdayTasks.length > 0 && (isNewDay || matchdayTaskCountChanged)) {
         console.log(`   🔍 Checking matchday tasks (daily check)...`);
         this.lastMatchdayCheckDate = now.toISOString();
+        this.lastMatchdayTaskCount = matchdayTasks.length;
         
         for (const task of matchdayTasks) {
           try {
@@ -523,8 +515,11 @@ class TaskSchedulerService {
             console.error(`Error checking matchday task ${task.id}:`, error);
           }
         }
-      } else if (matchdayTasks.length > 0 && !isNewDay) {
+      } else if (matchdayTasks.length > 0 && !isNewDay && !matchdayTaskCountChanged) {
         console.log(`   ⏭️  Skipping matchday tasks (already checked today)`);
+      } else if (matchdayTasks.length === 0) {
+        // No matchday tasks - don't show skip message
+        this.lastMatchdayTaskCount = 0;
       }
 
       // Check other tasks every minute (daily, weekly, event-based, etc.)
@@ -544,6 +539,7 @@ class TaskSchedulerService {
   }
 
   async start() {
+    await this.db.connect();
     console.log('Task Scheduler Service started');
     console.log(`   Check interval: ${this.checkInterval / 1000} seconds`);
     
@@ -569,6 +565,7 @@ class TaskSchedulerService {
       clearInterval(this.checkIntervalId);
       this.checkIntervalId = null;
     }
+    await this.db.disconnect();
     console.log('Task Scheduler Service stopped');
   }
 }

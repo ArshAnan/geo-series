@@ -1,18 +1,18 @@
 // Kafka Event Consumer - Listens for message.received events
 require('dotenv').config();
 const { Kafka } = require('kafkajs');
-const fs = require('fs-extra');
-const path = require('path');
 const config = require('./config.json');
+const DatabaseService = require('./database-service');
 
 class KafkaEventConsumer {
   constructor(targetChatId = null, targetPhoneNumbers = []) {
     this.targetChatId = targetChatId;
     this.targetPhoneNumbers = targetPhoneNumbers.map(p => p.trim());
-    this.processedEventIds = new Set();
-    this.processedMessageIds = new Set();
+    this.processedEventIds = new Set(); // In-memory cache
+    this.processedMessageIds = new Set(); // In-memory cache
+    this.db = new DatabaseService();
     
-    // Load processed IDs from file to avoid re-processing on restart
+    // Load processed IDs from MongoDB to avoid re-processing on restart
     this.loadProcessedIds();
 
     // Kafka Configuration (using existing setup)
@@ -47,29 +47,18 @@ class KafkaEventConsumer {
 
   async loadProcessedIds() {
     try {
-      const stateFile = path.join(__dirname, 'logs', 'processed-ids.json');
-      if (await fs.pathExists(stateFile)) {
-        const data = await fs.readJson(stateFile);
-        this.processedEventIds = new Set(data.eventIds || []);
-        this.processedMessageIds = new Set(data.messageIds || []);
-        console.log(`Loaded ${this.processedEventIds.size} processed event IDs and ${this.processedMessageIds.size} processed message IDs`);
-      }
+      await this.db.connect();
+      // Note: We'll check MongoDB directly, this cache is just for performance
+      // Load recent ones into memory cache if needed
+      console.log('Processed IDs will be checked from MongoDB');
     } catch (error) {
-      console.warn('Could not load processed IDs:', error.message);
+      console.warn('Could not connect to MongoDB for processed IDs:', error.message);
     }
   }
 
   async saveProcessedIds() {
-    try {
-      const stateFile = path.join(__dirname, 'logs', 'processed-ids.json');
-      await fs.ensureDir(path.dirname(stateFile));
-      await fs.writeJson(stateFile, {
-        eventIds: Array.from(this.processedEventIds),
-        messageIds: Array.from(this.processedMessageIds)
-      }, { spaces: 2 });
-    } catch (error) {
-      console.warn('Could not save processed IDs:', error.message);
-    }
+    // No longer needed - MongoDB handles persistence
+    // IDs are saved immediately when processed
   }
 
   /**
@@ -81,42 +70,37 @@ class KafkaEventConsumer {
     const fromPhone = String(eventData.from_phone || '').trim();
     const chatHandles = eventData.chat_handles || [];
 
-    // If targetChatId is set, only process that chat
-    if (this.targetChatId && chatId !== String(this.targetChatId)) {
-      return false;
-    }
+    // Collect all participant phone numbers (sender + all chat handles)
+    const allPhones = [
+      fromPhone,
+      ...chatHandles.map(h => String(h.identifier || '').trim())
+    ].filter(p => p); // Remove empty strings
 
-    // If target phone numbers are set, check if any participant matches
-    // This works for group chats - if ANY target number is in the chat, monitor it
-    if (this.targetPhoneNumbers.length > 0) {
-      // Collect all participant phone numbers (sender + all chat handles)
-      const allPhones = [
-        fromPhone,
-        ...chatHandles.map(h => String(h.identifier || '').trim())
-      ].filter(p => p); // Remove empty strings
+    // Normalize target phone numbers
+    const normalizedTargets = this.targetPhoneNumbers.map(t => String(t).trim());
 
-      // Normalize target phone numbers
-      const normalizedTargets = this.targetPhoneNumbers.map(t => String(t).trim());
-
-      // Check if any target phone number matches any participant
-      const hasTargetPhone = normalizedTargets.some(target => 
-        allPhones.some(phone => {
-          // Exact match
-          if (phone === target) return true;
-          // Check if one contains the other (handles different formats)
-          if (phone.includes(target) || target.includes(phone)) return true;
-          // Check last 10 digits (handles country code differences)
-          const phoneLast10 = phone.slice(-10);
-          const targetLast10 = target.slice(-10);
-          if (phoneLast10 === targetLast10 && phoneLast10.length === 10) return true;
-          return false;
-        })
-      );
-
-      if (!hasTargetPhone) {
+    // Check if any target phone number matches any participant
+    const hasTargetPhone = normalizedTargets.some(target => 
+      allPhones.some(phone => {
+        // Exact match
+        if (phone === target) return true;
+        // Check if one contains the other (handles different formats)
+        if (phone.includes(target) || target.includes(phone)) return true;
+        // Check last 10 digits (handles country code differences)
+        const phoneLast10 = phone.slice(-10);
+        const targetLast10 = target.slice(-10);
+        if (phoneLast10 === targetLast10 && phoneLast10.length === 10) return true;
         return false;
-      }
+      })
+    );
 
+    // Process message if:
+    // 1. Chat ID matches target chat ID (if set), OR
+    // 2. Any target phone number is a participant
+    const matchesTargetChat = this.targetChatId && chatId === String(this.targetChatId);
+    const matchesTargetPhone = this.targetPhoneNumbers.length > 0 && hasTargetPhone;
+
+    if (matchesTargetChat || matchesTargetPhone) {
       // Log group chat detection
       if (chatHandles.length > 1) {
         console.log(`👥 Group chat detected (${allPhones.length} participants)`);
@@ -125,9 +109,10 @@ class KafkaEventConsumer {
           allPhones.some(p => p === t || p.includes(t) || t.includes(p))
         ).join(', ')}`);
       }
+      return true;
     }
 
-    return true;
+    return false;
   }
 
   /**
@@ -164,8 +149,9 @@ class KafkaEventConsumer {
         return;
       }
 
-      // Skip if already processed
-      if (this.processedEventIds.has(eventData.event_id)) {
+      // Skip if already processed (check MongoDB)
+      const isEventProcessed = await this.db.isEventProcessed(eventData.event_id);
+      if (isEventProcessed || this.processedEventIds.has(eventData.event_id)) {
         return;
       }
 
@@ -185,8 +171,10 @@ class KafkaEventConsumer {
         return;
       }
 
-      // Skip if message ID already processed
-      if (this.processedMessageIds.has(eventData.data.id)) {
+      // Skip if message ID already processed (check MongoDB)
+      const isMessageProcessed = await this.db.isMessageProcessed(eventData.data.id);
+      if (isMessageProcessed || this.processedMessageIds.has(eventData.data.id)) {
+        await this.db.markEventProcessed(eventData.event_id);
         this.processedEventIds.add(eventData.event_id);
         return;
       }
@@ -221,10 +209,13 @@ class KafkaEventConsumer {
       }
 
       // Mark as processed
+      // Mark as processed in MongoDB
+      await this.db.markEventProcessed(eventData.event_id);
+      await this.db.markMessageProcessed(normalizedMessage.messageId);
+      
+      // Also cache in memory for performance
       this.processedEventIds.add(eventData.event_id);
       this.processedMessageIds.add(normalizedMessage.messageId);
-
-      // Periodically save processed IDs
       if (this.processedEventIds.size % 10 === 0) {
         await this.saveProcessedIds();
       }

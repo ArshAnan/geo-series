@@ -3,12 +3,11 @@ require('dotenv').config();
 const OpenAI = require('openai');
 const SeriesAPIClient = require('./api-client');
 const config = require('./config.json');
-const fs = require('fs-extra');
-const path = require('path');
 const GoogleSearchService = require('./google-search-service');
+const DatabaseService = require('./database-service');
 
 class ConversationInitiatorService {
-  constructor() {
+  constructor(targetChatId = null) {
     if (!process.env.OPENAI_API_MY_KEY) {
       throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
@@ -20,6 +19,8 @@ class ConversationInitiatorService {
     this.model = config.openaiModel || 'gpt-4o';
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
+    this.db = new DatabaseService();
+    this.targetChatId = targetChatId || config.chatId; // Use configured chat ID if provided
     
     // Configuration
     this.checkInterval = (config.conversationInitiatorIntervalMinutes || 2) * 60 * 1000; // Default: 2 minutes
@@ -34,45 +35,19 @@ class ConversationInitiatorService {
     // Track last message time per chat to determine inactivity
     this.lastMessageTime = new Map(); // chatId -> timestamp
     
-    // File paths
-    this.keyMomentsFile = path.join(__dirname, 'logs', 'key-moments.json');
-    this.conversationsFile = path.join(__dirname, 'logs', 'conversations.json');
-    this.initiatedConversationsFile = path.join(__dirname, 'logs', 'initiated-conversations.json');
-    
     // Interval timer
     this.checkIntervalId = null;
     
     // Initialize Google Search Service for current events
     this.googleSearchService = new GoogleSearchService();
-    
-    // Initialize files
-    this.initializeFiles();
   }
 
   /**
-   * Initialize storage files
-   */
-  async initializeFiles() {
-    try {
-      await fs.ensureDir(path.dirname(this.initiatedConversationsFile));
-      if (!(await fs.pathExists(this.initiatedConversationsFile))) {
-        await fs.writeJson(this.initiatedConversationsFile, [], { spaces: 2 });
-      }
-    } catch (error) {
-      console.error('Error initializing conversation initiator files:', error);
-    }
-  }
-
-  /**
-   * Load key moments from storage
+   * Load key moments from MongoDB
    */
   async loadKeyMoments() {
     try {
-      if (await fs.pathExists(this.keyMomentsFile)) {
-        const moments = await fs.readJson(this.keyMomentsFile);
-        return moments || [];
-      }
-      return [];
+      return await this.db.getAllKeyMoments();
     } catch (error) {
       console.error('Error loading key moments:', error);
       return [];
@@ -80,19 +55,85 @@ class ConversationInitiatorService {
   }
 
   /**
-   * Load conversations to track activity
+   * Load conversations from API for a specific chat
+   * Fetches messages for the target chat ID only
    */
-  async loadConversations() {
-    try {
-      if (await fs.pathExists(this.conversationsFile)) {
-        const conversations = await fs.readJson(this.conversationsFile);
-        return conversations || [];
-      }
-      return [];
-    } catch (error) {
-      console.error('Error loading conversations:', error);
+  async loadConversationsForChat(chatId) {
+    if (!this.apiClient.enabled) {
+      console.warn('API client not enabled. Cannot load conversations from API.');
       return [];
     }
+
+    if (!chatId) {
+      return [];
+    }
+
+    try {
+      // Only fetch the LAST page (latest messages) for conversation starter context
+      // This is more efficient and the conversation starter only needs recent context
+      const messagesResponse = await this.apiClient.getChatMessages(chatId, null, 25, true, false);
+      // API response structure: { data: [...] } or just [...]
+      const messages = messagesResponse?.data || messagesResponse || [];
+  
+      if (!Array.isArray(messages)) {
+        console.warn(`   ⚠️  Unexpected API response format for chat ${chatId}`);
+        return [];
+      }
+
+      // Deduplicate messages by messageId (in case API returns duplicates)
+      const messageMap = new Map();
+      messages.forEach(msg => {
+        const messageId = String(msg.id || msg.message_id);
+        if (messageId && !messageMap.has(messageId)) {
+          messageMap.set(messageId, msg);
+        }
+      });
+
+      // Convert API messages to the format expected by the rest of the system
+      const convertedMessages = Array.from(messageMap.values()).map(msg => ({
+        chatId: String(chatId),
+        messageId: String(msg.id || msg.message_id),
+        fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
+        text: msg.text || '',
+        sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
+        chatHandles: msg.chat_handles || [],
+        attachments: msg.attachments || [],
+        isRead: msg.is_read || false,
+        service: msg.service || 'iMessage'
+      }));
+
+      // Sort by sentAt timestamp (oldest first) to ensure chronological order
+      convertedMessages.sort((a, b) => {
+        const timeA = new Date(a.sentAt).getTime();
+        const timeB = new Date(b.sentAt).getTime();
+        return timeA - timeB;
+      });
+
+      console.log(`   📥 Loaded ${convertedMessages.length} recent messages for chat ${chatId} (last page only)`);
+      
+      return convertedMessages;
+    } catch (error) {
+      console.warn(`   ⚠️  Error fetching messages for chat ${chatId}:`, error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Load conversations from API (deprecated - use loadConversationsForChat instead)
+   * Kept for backward compatibility but only loads target chat
+   */
+  async loadConversations() {
+    if (!this.targetChatId) {
+      return [];
+    }
+    return await this.loadConversationsForChat(this.targetChatId);
+  }
+  
+  /**
+   * Check if message is from sender phone number
+   */
+  isFromSender(fromPhone) {
+    return fromPhone === this.senderPhoneNumber;
   }
 
   /**
@@ -109,7 +150,7 @@ class ConversationInitiatorService {
   /**
    * Generate a generic conversation starter when no shared interests are available
    */
-  async generateGenericConversationStarter(conversationHistory = []) {
+  async generateGenericConversationStarter(conversationHistory = [], isGroupChat = false) {
     try {
       const now = new Date();
       const currentDate = now.toLocaleDateString('en-US', { 
@@ -119,17 +160,21 @@ class ConversationInitiatorService {
         day: 'numeric' 
       });
 
+      const groupChatInstruction = isGroupChat 
+        ? `\n\nCRITICAL: This is a GROUP CHAT with multiple participants. Address BOTH (or ALL) participants in your message. Use "you both", "you all", or ask questions that engage everyone. Make sure the conversation starter is inclusive and addresses the group, not just one person.`
+        : '';
+
       const systemPrompt = `You are a friendly person who wants to start a natural conversation. 
 Generate a casual, engaging conversation starter (1-2 sentences max). 
 Be genuine, friendly, and not overly formal. Use emojis sparingly (maybe 1-2 if appropriate).
 The message should feel like a natural text message, not a formal email.
 
-IMPORTANT: Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.`;
+IMPORTANT: Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.${groupChatInstruction}`;
 
-      // Build conversation history context
+      // Build conversation history context - only use the last 2-3 messages
       let historyContext = '';
       if (conversationHistory && conversationHistory.length > 0) {
-        const recentHistory = conversationHistory.slice(-10); // Last 10 messages for context
+        const recentHistory = conversationHistory.slice(-3); // Last 3 messages for context
         historyContext = `\n\nPrevious Conversation Context (most recent messages):
 ${recentHistory.map((msg, idx) => {
           const role = msg.isFromSender ? 'You' : 'Them';
@@ -198,17 +243,12 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
    */
   async hasAlreadyInitiated(chatId, interestDescription) {
     try {
-      if (await fs.pathExists(this.initiatedConversationsFile)) {
-        const initiated = await fs.readJson(this.initiatedConversationsFile);
-        const today = new Date().toISOString().split('T')[0];
-        
-        return initiated.some(init => 
-          init.chatId === chatId &&
-          init.date === today &&
-          init.interestDescription === interestDescription
-        );
-      }
-      return false;
+      const today = new Date().toISOString().split('T')[0];
+      const initiations = await this.db.getInitiationsByChatAndDate(chatId, today);
+      
+      return initiations.some(init => 
+        init.interestDescription === interestDescription
+      );
     } catch (error) {
       console.error('Error checking initiated conversations:', error);
       return false;
@@ -220,19 +260,17 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
    */
   async hasRecentlyInitiated(chatId, interestDescription, minutesAgo = 60) {
     try {
-      if (await fs.pathExists(this.initiatedConversationsFile)) {
-        const initiated = await fs.readJson(this.initiatedConversationsFile);
-        const cutoffTime = Date.now() - (minutesAgo * 60 * 1000);
-        
-        return initiated.some(init => {
-          if (init.chatId === chatId && init.interestDescription === interestDescription) {
-            const initiatedTime = new Date(init.initiatedAt).getTime();
-            return initiatedTime > cutoffTime;
-          }
-          return false;
-        });
-      }
-      return false;
+      const cutoffTime = Date.now() - (minutesAgo * 60 * 1000);
+      const today = new Date().toISOString().split('T')[0];
+      const initiations = await this.db.getInitiationsByChatAndDate(chatId, today);
+      
+      return initiations.some(init => {
+        if (init.interestDescription === interestDescription) {
+          const initiatedTime = new Date(init.initiatedAt).getTime();
+          return initiatedTime > cutoffTime;
+        }
+        return false;
+      });
     } catch (error) {
       console.error('Error checking recent initiations:', error);
       return false;
@@ -244,18 +282,15 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
    */
   async recordInitiation(chatId, interestDescription, messageText) {
     try {
-      const initiated = await fs.readJson(this.initiatedConversationsFile);
       const today = new Date().toISOString().split('T')[0];
       
-      initiated.push({
+      await this.db.recordInitiation({
         chatId,
         date: today,
         interestDescription,
         messageText,
         initiatedAt: new Date().toISOString()
       });
-      
-      await fs.writeJson(this.initiatedConversationsFile, initiated, { spaces: 2 });
       
       // Update in-memory counters
       const count = this.initiationCount.get(chatId) || 0;
@@ -325,12 +360,35 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
    * Get conversation history for a specific chat
    */
   getConversationHistoryForChat(chatId, conversations, maxMessages = 20) {
-    const chatMessages = conversations
-      .filter(msg => msg.chatId === chatId)
-      .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime())
+    // Filter messages for this chat only
+    const chatMessages = conversations.filter(msg => String(msg.chatId) === String(chatId));
+    
+    // Deduplicate by messageId (extra safety)
+    const messageMap = new Map();
+    chatMessages.forEach(msg => {
+      const messageId = String(msg.messageId || msg.id);
+      if (messageId && !messageMap.has(messageId)) {
+        messageMap.set(messageId, msg);
+      }
+    });
+    
+    // Sort by timestamp (oldest first) to ensure chronological order
+    const sortedMessages = Array.from(messageMap.values())
+      .sort((a, b) => {
+        const timeA = new Date(a.sentAt).getTime();
+        const timeB = new Date(b.sentAt).getTime();
+        return timeA - timeB;
+      })
       .slice(-maxMessages); // Get last N messages
     
-    return chatMessages.map(msg => ({
+    // Log for debugging
+    if (sortedMessages.length > 0) {
+      const firstMsg = sortedMessages[0];
+      const lastMsg = sortedMessages[sortedMessages.length - 1];
+      console.log(`   📚 Conversation history: ${sortedMessages.length} messages (from ${new Date(firstMsg.sentAt).toLocaleString()} to ${new Date(lastMsg.sentAt).toLocaleString()})`);
+    }
+    
+    return sortedMessages.map(msg => ({
       fromPhone: msg.fromPhone,
       text: msg.text || '',
       sentAt: msg.sentAt,
@@ -363,7 +421,7 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
   /**
    * Generate a natural conversation starter based on shared interest
    */
-  async generateConversationStarter(sharedInterest, conversationHistory = []) {
+  async generateConversationStarter(sharedInterest, conversationHistory = [], isGroupChat = false) {
     try {
       // Get current date and time
       const now = new Date();
@@ -382,6 +440,10 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
       // Try to get current events related to the interest
       const currentEvents = await this.getCurrentEventsForInterest(sharedInterest);
       
+      const groupChatInstruction = isGroupChat 
+        ? `\n\nCRITICAL: This is a GROUP CHAT with multiple participants. Address BOTH (or ALL) participants in your message. Use "you both", "you all", or ask questions that engage everyone. Make sure the conversation starter is inclusive and addresses the group, not just one person.`
+        : '';
+      
       const systemPrompt = `You are a friendly person who wants to start a natural conversation with someone you share interests with. 
 Generate a casual, engaging conversation starter (1-2 sentences max) based on a shared interest. 
 Be genuine, friendly, and not overly formal. Use emojis sparingly (maybe 1-2 if appropriate).
@@ -390,12 +452,12 @@ The message should feel like a natural text message, not a formal email.
 IMPORTANT: 
 - If the shared interest is related to sports, entertainment, or current events, reference what's happening RIGHT NOW (today's games, current events, recent news, etc.) when relevant.
 - Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.
-- Make it timely and relevant to the current moment and the relationship context.`;
+- Make it timely and relevant to the current moment and the relationship context.${groupChatInstruction}`;
 
-      // Build conversation history context
+      // Build conversation history context - only use the last 2-3 messages
       let historyContext = '';
       if (conversationHistory && conversationHistory.length > 0) {
-        const recentHistory = conversationHistory.slice(-10); // Last 10 messages for context
+        const recentHistory = conversationHistory.slice(-3); // Last 3 messages for context
         historyContext = `\n\nPrevious Conversation Context (most recent messages):
 ${recentHistory.map((msg, idx) => {
           const role = msg.isFromSender ? 'You' : 'Them';
@@ -460,19 +522,23 @@ Use this current information to make your conversation starter timely and releva
     try {
       console.log('\n🔔 Conversation Initiator: Checking for opportunities to start conversations...');
       
-      // Load data
-      const keyMoments = await this.loadKeyMoments();
-      const conversations = await this.loadConversations();
-      
-      // Get all chat IDs
-      const chatIds = this.getChatIds(conversations);
-      
-      if (chatIds.length === 0) {
-        console.log('   No chats found. Waiting for conversations...');
+      // Only check the target chat ID if configured
+      if (!this.targetChatId) {
+        console.log('   No target chat ID configured. Skipping conversation initiation.');
         return;
       }
       
-      console.log(`   Found ${chatIds.length} chat(s) to check`);
+      const targetChatId = String(this.targetChatId);
+      console.log(`   🎯 Only checking target chat ID: ${targetChatId}`);
+      
+      // Load data only for the target chat
+      const keyMoments = await this.loadKeyMoments();
+      const conversations = await this.loadConversationsForChat(targetChatId);
+      
+      // Use only the target chat ID
+      const chatIds = [targetChatId];
+      
+      console.log(`   Found 1 chat to check (target chat: ${targetChatId})`);
       console.log(`   Key moments available: ${keyMoments.length}`);
       
       let initiatedCount = 0;
@@ -485,13 +551,17 @@ Use this current information to make your conversation starter timely and releva
           // No daily limit - allow unlimited initiations as long as inactivity threshold is met
           
           // Check if chat is inactive
+          const chatMessages = conversations.filter(msg => msg.chatId === chatId);
           const isInactive = this.isChatInactive(chatId, conversations);
-          if (!isInactive) {
-            const chatMessages = conversations
-              .filter(msg => msg.chatId === chatId)
+          
+          // If no messages from API but we have a target chat ID, treat as inactive (allow initial message)
+          if (!isInactive && chatMessages.length === 0 && this.targetChatId && String(chatId) === String(this.targetChatId)) {
+            console.log(`   ✅ Chat ${chatId}: No messages found from API yet, will send initial message`);
+          } else if (!isInactive) {
+            const sortedMessages = chatMessages
               .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
-            if (chatMessages.length > 0) {
-              const lastMessage = chatMessages[0];
+            if (sortedMessages.length > 0) {
+              const lastMessage = sortedMessages[0];
               const lastMessageTime = new Date(lastMessage.sentAt).getTime();
               const now = Date.now();
               const inactivityMinutes = (now - lastMessageTime) / (1000 * 60);
@@ -504,9 +574,28 @@ Use this current information to make your conversation starter timely and releva
           
           console.log(`   ✅ Chat ${chatId}: Inactive for ${this.minInactivityMinutes}+ minutes`);
           
-          // Get conversation history for context
-          const conversationHistory = this.getConversationHistoryForChat(chatId, conversations, 20);
+          // Get conversation history for context - only last 2-3 messages
+          const conversationHistory = this.getConversationHistoryForChat(chatId, conversations, 3);
           console.log(`   📚 Loaded ${conversationHistory.length} previous messages for context`);
+          
+          // Detect if this is a group chat by checking chat handles
+          const allChatHandles = new Set();
+          chatMessages.forEach(msg => {
+            if (msg.chatHandles && Array.isArray(msg.chatHandles)) {
+              msg.chatHandles.forEach(handle => {
+                const phone = handle.identifier || handle.phone_number || handle;
+                if (phone) {
+                  allChatHandles.add(String(phone));
+                }
+              });
+            }
+          });
+          const isGroupChat = allChatHandles.size > 2; // More than 2 participants (excluding sender)
+          const participantCount = allChatHandles.size;
+          
+          if (isGroupChat) {
+            console.log(`   👥 Group chat detected with ${participantCount} participants`);
+          }
           
           // Get shared interests for this chat
           const sharedInterests = this.getSharedInterestsForChat(keyMoments, chatId);
@@ -536,12 +625,12 @@ Use this current information to make your conversation starter timely and releva
             // Generate conversation starter based on shared interest with conversation history
             console.log(`   💭 Generating conversation starter for chat ${chatId}...`);
             console.log(`      Shared interest: ${interest.description}`);
-            messageText = await this.generateConversationStarter(interest, conversationHistory);
+            messageText = await this.generateConversationStarter(interest, conversationHistory, isGroupChat);
             interestDescription = interest.description;
           } else {
             // No shared interests - use generic starter with conversation history
             console.log(`   💭 No shared interests found for chat ${chatId}, using generic conversation starter...`);
-            messageText = await this.generateGenericConversationStarter(conversationHistory);
+            messageText = await this.generateGenericConversationStarter(conversationHistory, isGroupChat);
           }
           
           console.log(`      Generated message: "${messageText}"`);
@@ -550,6 +639,7 @@ Use this current information to make your conversation starter timely and releva
           if (this.apiClient.enabled) {
             try {
               console.log(`   📤 Sending conversation starter to chat ${chatId}...`);
+              console.log(`      Using sender phone: ${this.senderPhoneNumber}`);
               const result = await this.apiClient.sendMessage(
                 chatId,
                 messageText,
@@ -557,21 +647,43 @@ Use this current information to make your conversation starter timely and releva
                 this.senderPhoneNumber
               );
               
-              console.log(`   ✅ Successfully initiated conversation!`);
-              console.log(`      Chat ID: ${chatId}`);
-              console.log(`      Message: "${messageText}"`);
+              console.log(`   ✅ API Response received:`);
+              console.log(`      Response: ${JSON.stringify(result, null, 2).substring(0, 500)}`);
               
-              // Record initiation
-              await this.recordInitiation(chatId, interestDescription, messageText);
-              initiatedCount++;
+              // Check if message was actually sent
+              // API response structure: { data: { id, text, sent_at, delivery_status, ... } }
+              const messageId = result?.data?.id || result?.id || result?.message_id || result?.chat_message?.id;
+              const deliveryStatus = result?.data?.delivery_status || result?.delivery_status;
+              
+              if (result && messageId) {
+                console.log(`   ✅ Successfully initiated conversation!`);
+                console.log(`      Chat ID: ${chatId}`);
+                console.log(`      Message ID: ${messageId}`);
+                console.log(`      Delivery Status: ${deliveryStatus || 'N/A'}`);
+                console.log(`      Message: "${messageText}"`);
+                
+                // Record initiation
+                await this.recordInitiation(chatId, interestDescription, messageText);
+                initiatedCount++;
+              } else {
+                console.warn(`   ⚠️  API returned response but no message ID found. Response:`, JSON.stringify(result));
+                // Still record it
+                await this.recordInitiation(chatId, interestDescription, messageText);
+                initiatedCount++;
+              }
             } catch (error) {
               console.error(`   ❌ Error sending message to chat ${chatId}:`, error.message);
               if (error.response) {
                 console.error(`      Status: ${error.response.status}`);
-                console.error(`      Data: ${JSON.stringify(error.response.data, null, 2)}`);
+                console.error(`      Status Text: ${error.response.statusText}`);
+                console.error(`      Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
+              }
+              if (error.request) {
+                console.error(`      Request made but no response received`);
               }
               // Log the full error for debugging
               console.error(`      Full error:`, error);
+              console.error(`      Stack:`, error.stack);
             }
           } else {
             console.warn(`   ⚠️  API client not enabled. Would send: "${messageText}"`);
@@ -599,6 +711,7 @@ Use this current information to make your conversation starter timely and releva
    * Start the service
    */
   async start() {
+    await this.db.connect();
     console.log('Conversation Initiator Service started');
     console.log(`   Check interval: ${this.checkInterval / (60 * 1000)} minutes`);
     console.log(`   Min inactivity: ${this.minInactivityMinutes} minutes`);
