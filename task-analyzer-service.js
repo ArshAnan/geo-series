@@ -283,50 +283,11 @@ Return ONLY valid JSON, no other text. Format:
       console.log(`   Messages in batch: ${conversationBatch.messages.length}`);
       console.log(`   Key moments available: ${keyMoments.length}`);
 
-      // Fetch all unprocessed messages from API for better context
-      let allMessages = conversationBatch.messages;
-      if (this.apiClient.enabled && this.targetChatId && String(conversationBatch.chatId) === String(this.targetChatId)) {
-        try {
-          console.log(`   📥 Fetching all unprocessed messages from API for better task analysis...`);
-          const messagesResponse = await this.apiClient.getChatMessages(conversationBatch.chatId, null, 25, false, true);
-          const apiMessages = messagesResponse?.data || messagesResponse || [];
-          
-          if (Array.isArray(apiMessages) && apiMessages.length > 0) {
-            // Convert API messages to batch format
-            const apiMessagesFormatted = apiMessages.map(msg => ({
-              chatId: conversationBatch.chatId,
-              messageId: String(msg.id || msg.message_id),
-              fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
-              text: msg.text || '',
-              sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
-              chatHandles: msg.chat_handles || [],
-              attachments: msg.attachments || [],
-              isRead: msg.is_read || false,
-              service: msg.service || 'iMessage'
-            }));
-
-            // Combine batch messages with API messages, avoiding duplicates
-            const batchMessageIds = new Set(conversationBatch.messages.map(m => m.messageId));
-            const uniqueApiMessages = apiMessagesFormatted.filter(m => !batchMessageIds.has(m.messageId));
-            
-            // Merge and sort by timestamp
-            allMessages = [...conversationBatch.messages, ...uniqueApiMessages]
-              .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
-            
-            console.log(`   ✅ Using ${allMessages.length} total messages (${conversationBatch.messages.length} from batch + ${uniqueApiMessages.length} from API)`);
-          }
-        } catch (error) {
-          console.warn(`   ⚠️  Error fetching messages from API, using batch only:`, error.message);
-        }
-      }
-
-      // Create enhanced batch with all messages
-      const enhancedBatch = {
-        ...conversationBatch,
-        messages: allMessages
-      };
-
-      const tasks = await this.analyzeConversationForTasks(enhancedBatch, keyMoments);
+      // Only use messages from the current batch (no past history)
+      // Task analysis should only happen on current conversations, not historical data
+      console.log(`   📋 Using only current batch messages for task analysis (${conversationBatch.messages.length} messages)`);
+      
+      const tasks = await this.analyzeConversationForTasks(conversationBatch, keyMoments);
 
       if (tasks.length === 0) {
         console.log(`   ⚠️  No tasks extracted for chat ${conversationBatch.chatId}`);

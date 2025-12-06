@@ -264,6 +264,44 @@ class SeriesAPIClient {
       throw error;
     }
   }
+
+  /**
+   * Add a reaction to a message
+   * Based on API spec: POST /api/chat_messages/{id}/reactions
+   * @param {number} messageId - The message ID to react to
+   * @param {string} reactionType - The reaction type: "like", "love", "laugh", "emphasize", "dislike", "question"
+   */
+  async addReaction(messageId, reactionType) {
+    if (!this.enabled) {
+      throw new Error('API client is not enabled. Set SERIES_API_BASE_URL and SERIES_API_KEY in .env');
+    }
+    try {
+      const payload = {
+        operation: "add",
+        type: reactionType
+      };
+
+      console.log(`   📡 API Request: POST /api/chat_messages/${messageId}/reactions`);
+      console.log(`   📤 Payload: ${JSON.stringify(payload, null, 2)}`);
+      
+      const response = await this.client.post(
+        `/api/chat_messages/${messageId}/reactions`,
+        payload
+      );
+      
+      console.log(`   📥 API Response Status: ${response.status}`);
+      console.log(`   📥 API Response Data: ${JSON.stringify(response.data, null, 2)}`);
+      
+      return response.data;
+    } catch (error) {
+      console.error('   ❌ Error adding reaction:', error.message);
+      if (error.response) {
+        console.error(`   ❌ Response Status: ${error.response.status}`);
+        console.error(`   ❌ Response Data: ${JSON.stringify(error.response.data, null, 2)}`);
+      }
+      throw error;
+    }
+  }
 }
 
 module.exports = SeriesAPIClient;

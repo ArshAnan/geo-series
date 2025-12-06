@@ -112,6 +112,28 @@ class DatabaseService {
     }
   }
 
+  /**
+   * Get latest N messages for a chat (sorted by sentAt descending, then take last N)
+   * Useful for conversation initiator to get recent context
+   */
+  async getLatestMessagesByChat(chatId, limit = 3) {
+    await this.connect();
+    try {
+      return await this.db.collection('conversations')
+        .find({ chatId })
+        .sort({ sentAt: -1 }) // Sort descending (newest first)
+        .limit(limit)
+        .toArray()
+        .then(messages => {
+          // Reverse to get chronological order (oldest to newest)
+          return messages.reverse();
+        });
+    } catch (error) {
+      console.error('Error getting latest messages:', error);
+      return [];
+    }
+  }
+
   async getAllConversations(limit = 10000) {
     await this.connect();
     try {

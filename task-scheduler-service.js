@@ -386,10 +386,13 @@ class TaskSchedulerService {
             return message;
           }
           
-          // Fallback to generic message
-          return `⚽ ${metadata.teamName} might have a match today! Want to watch together? 🎉`;
+          // Fallback to confident message
+          const now = new Date();
+          const hour = now.getHours();
+          const timeOfDay = hour >= 17 ? 'tonight' : hour >= 12 ? 'this afternoon' : 'today';
+          return `⚽ ${metadata.teamName} is having a match ${timeOfDay}! Want to watch together? 🎉`;
         }
-        return `🏀 Game reminder! Want to catch the game today?`;
+        return `🏀 Want to catch the game today?`;
       
       case 'goal':
         if (metadata.goalType === 'weight_loss' || task.title.toLowerCase().includes('weight')) {
@@ -398,13 +401,13 @@ class TaskSchedulerService {
         return `📊 Progress check! How are you doing with: ${task.title}?`;
       
       case 'common_interest':
-        return `🎯 Reminder: ${task.title}\n${task.description}`;
+        return `🎯 ${task.title}\n${task.description}`;
       
       case 'event':
-        return `📅 Reminder: ${task.metadata.eventName || task.title} is coming up!`;
+        return `📅 ${task.metadata.eventName || task.title} is coming up!`;
       
       default:
-        return `📌 Reminder: ${task.title}`;
+        return `📌 ${task.title}`;
     }
   }
 

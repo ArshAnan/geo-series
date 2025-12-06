@@ -12,6 +12,7 @@ class NotificationService {
     this.onKeyMomentCallback = null;
     this.sentMomentIds = new Set(); // Track which moments we've already sent (in-memory cache)
     this.db = new DatabaseService();
+    this.sendingSummaries = new Set(); // Track chats that are currently sending summaries to prevent duplicates
     
     // Note: MongoDB connection will happen in start() method
   }
@@ -100,10 +101,17 @@ class NotificationService {
 
   /**
    * Send conversation summary to user
-   * Loads ALL key moments from storage for this chat and sends them
+   * Only sends UNSENT key moments in a single message
    */
   async sendConversationSummary(chatId) {
+    // Prevent concurrent sends for the same chat
+    if (this.sendingSummaries.has(chatId)) {
+      console.log(`⏭️  Summary already being sent for chat ${chatId}, skipping duplicate`);
+      return;
+    }
+
     try {
+      this.sendingSummaries.add(chatId);
       console.log(`📋 Preparing to send conversation summary for chat ${chatId}...`);
       
       // Load ALL key moments from storage for this chat
@@ -114,11 +122,25 @@ class NotificationService {
         return;
       }
 
-      console.log(`📊 Found ${allMomentsFromStorage.length} key moments in storage for chat ${chatId}`);
+      // Filter to only UNSENT moments
+      const unsentMoments = [];
+      for (const moment of allMomentsFromStorage) {
+        const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
+        const isSent = await this.db.isMomentSent(momentId);
+        if (!isSent) {
+          unsentMoments.push(moment);
+        }
+      }
 
-      // Send ALL moments from conversation history (not just new ones)
-      // This ensures the user sees the complete picture of their conversation
-      const summary = this.formatSummary(allMomentsFromStorage, chatId);
+      if (unsentMoments.length === 0) {
+        console.log(`ℹ️  All key moments for chat ${chatId} have already been sent`);
+        return;
+      }
+
+      console.log(`📊 Found ${unsentMoments.length} unsent key moment(s) out of ${allMomentsFromStorage.length} total for chat ${chatId}`);
+
+      // Send only UNSENT moments in a single message
+      const summary = this.formatSummary(unsentMoments, chatId);
       
       // Send to user via API
       if (this.apiClient.enabled) {
@@ -129,17 +151,22 @@ class NotificationService {
         console.log(summary);
       }
 
-      // Mark all moments as sent to avoid duplicate notifications
-      for (const moment of allMomentsFromStorage) {
+      // Mark only the unsent moments as sent to avoid duplicate notifications
+      for (const moment of unsentMoments) {
         const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
         await this.db.markMomentSent(momentId, chatId);
         this.sentMomentIds.add(momentId); // Cache in memory too
       }
 
-      console.log(`✅ Sent all ${allMomentsFromStorage.length} key moments from conversation history to user for chat ${chatId}`);
+      console.log(`✅ Sent ${unsentMoments.length} key moment(s) to user for chat ${chatId} in a single message`);
     } catch (error) {
       console.error(`❌ Error sending conversation summary for chat ${chatId}:`, error);
       console.error(error.stack);
+    } finally {
+      // Remove from sending set after a short delay to prevent rapid re-sends
+      setTimeout(() => {
+        this.sendingSummaries.delete(chatId);
+      }, 5000); // 5 second cooldown
     }
   }
 

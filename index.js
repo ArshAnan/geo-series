@@ -124,13 +124,15 @@ class ConversationLogger {
       // Initialize services
       this.eventConsumer = new KafkaEventConsumer(chatId, config.targetPhoneNumbers || []);
       this.messageProcessor = new MessageProcessor();
-      this.openaiAnalyzer = new OpenAIAnalyzer();
+      this.openaiAnalyzer = new OpenAIAnalyzer(chatId);
       this.storageService = new StorageService();
       this.notificationService = new NotificationService();
-      this.aiResponseService = new AIResponseService(chatId);
-      this.conversationInitiatorService = new ConversationInitiatorService(chatId);
       this.taskAnalyzerService = new TaskAnalyzerService(chatId);
       this.taskSchedulerService = new TaskSchedulerService();
+      this.aiResponseService = new AIResponseService(chatId);
+      // Set task analyzer reference in AI response service for task creation
+      this.aiResponseService.taskAnalyzer = this.taskAnalyzerService;
+      this.conversationInitiatorService = new ConversationInitiatorService(chatId);
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
       console.log('🔗 Setting up callbacks...');

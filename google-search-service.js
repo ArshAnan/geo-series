@@ -210,6 +210,62 @@ class GoogleSearchService {
   }
 
   /**
+   * Search for sports bars/venues to watch matches
+   */
+  async searchSportsBars(query, location = null) {
+    if (!this.enabled) {
+      throw new Error('Google Custom Search API not configured. Set GOOGLE_CUSTOM_SEARCH_API_KEY and GOOGLE_CUSTOM_SEARCH_ENGINE_ID in .env');
+    }
+
+    try {
+      // Build search query for sports bars
+      let searchQuery = query;
+      if (!searchQuery.toLowerCase().includes('sports bar')) {
+        searchQuery = `sports bar ${query}`;
+      }
+      if (location) {
+        searchQuery += ` near ${location}`;
+      }
+
+      const url = this.customSearchBaseURL;
+      const params = {
+        key: this.customSearchApiKey,
+        cx: this.customSearchEngineId,
+        q: searchQuery,
+        num: 10
+      };
+
+      console.log(`🔍 Searching Google for sports bars: "${searchQuery}"`);
+      const response = await axios.get(url, { params });
+      
+      if (!response.data.items || response.data.items.length === 0) {
+        console.log('No sports bar results found');
+        return [];
+      }
+
+      // Format results - filter and map to venue format
+      const venues = response.data.items.slice(0, 5).map((item, index) => {
+        // Try to extract address from snippet or title
+        const address = this.extractAddress(item.snippet || item.title || '');
+        
+        return {
+          name: item.title.replace(/\s*-\s*(Sports Bar|Bar|Restaurant|Menu|Yelp|TripAdvisor|Google).*$/i, '').trim(),
+          address: address || item.displayLink || 'Address not available',
+          rating: this.extractRating(item.snippet || ''),
+          snippet: item.snippet,
+          link: item.link
+        };
+      });
+
+      console.log(`✅ Found ${venues.length} sports bars/venues`);
+      return venues;
+    } catch (error) {
+      console.error('Error searching sports bars:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Format general place/activity recommendations as a message
    */
   formatPlaceRecommendations(results, query = null, preferences = {}) {

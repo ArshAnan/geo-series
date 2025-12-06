@@ -108,14 +108,25 @@ class MessageProcessor {
   addMessage(message) {
     const chatId = message.chatId;
     
+    console.log(`\n📥 MESSAGE PROCESSOR: Adding message to buffer`);
+    console.log(`   Message ID: ${message.messageId}`);
+    console.log(`   Chat ID: ${chatId}`);
+    console.log(`   From: ${message.fromPhone}`);
+    console.log(`   Text: "${message.text}"`);
+    console.log(`   Sent At: ${message.sentAt}`);
+    
     if (!this.messageBuffers.has(chatId)) {
       this.messageBuffers.set(chatId, []);
+      console.log(`   Created new buffer for chat ${chatId}`);
     }
 
     this.messageBuffers.get(chatId).push(message);
+    const bufferSize = this.messageBuffers.get(chatId).length;
+    console.log(`   Buffer size for chat ${chatId}: ${bufferSize} message(s)`);
     
     // Schedule batch processing
     this.scheduleBatch(chatId);
+    console.log(`   Batch scheduled for chat ${chatId} (window: ${this.batchingWindow}ms)\n`);
   }
 
   async start() {

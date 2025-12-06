@@ -59,61 +59,32 @@ class ConversationInitiatorService {
    * Fetches messages for the target chat ID only
    */
   async loadConversationsForChat(chatId) {
-    if (!this.apiClient.enabled) {
-      console.warn('API client not enabled. Cannot load conversations from API.');
-      return [];
-    }
-
     if (!chatId) {
       return [];
     }
 
     try {
-      // Only fetch the LAST page (latest messages) for conversation starter context
-      // This is more efficient and the conversation starter only needs recent context
-      const messagesResponse = await this.apiClient.getChatMessages(chatId, null, 25, true, false);
-      // API response structure: { data: [...] } or just [...]
-      const messages = messagesResponse?.data || messagesResponse || [];
-  
-      if (!Array.isArray(messages)) {
-        console.warn(`   ⚠️  Unexpected API response format for chat ${chatId}`);
+      // Load from MongoDB instead of API - more reliable and faster
+      // Get all messages for this chat from MongoDB
+      const messages = await this.db.getConversationsByChat(String(chatId), 10000);
+      
+      if (!Array.isArray(messages) || messages.length === 0) {
+        console.log(`   📥 No messages found in MongoDB for chat ${chatId}`);
         return [];
       }
 
-      // Deduplicate messages by messageId (in case API returns duplicates)
-      const messageMap = new Map();
-      messages.forEach(msg => {
-        const messageId = String(msg.id || msg.message_id);
-        if (messageId && !messageMap.has(messageId)) {
-          messageMap.set(messageId, msg);
-        }
-      });
-
-      // Convert API messages to the format expected by the rest of the system
-      const convertedMessages = Array.from(messageMap.values()).map(msg => ({
-        chatId: String(chatId),
-        messageId: String(msg.id || msg.message_id),
-        fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
-        text: msg.text || '',
-        sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
-        chatHandles: msg.chat_handles || [],
-        attachments: msg.attachments || [],
-        isRead: msg.is_read || false,
-        service: msg.service || 'iMessage'
-      }));
-
       // Sort by sentAt timestamp (oldest first) to ensure chronological order
-      convertedMessages.sort((a, b) => {
+      messages.sort((a, b) => {
         const timeA = new Date(a.sentAt).getTime();
         const timeB = new Date(b.sentAt).getTime();
         return timeA - timeB;
       });
 
-      console.log(`   📥 Loaded ${convertedMessages.length} recent messages for chat ${chatId} (last page only)`);
+      console.log(`   📥 Loaded ${messages.length} messages from MongoDB for chat ${chatId}`);
       
-      return convertedMessages;
+      return messages;
     } catch (error) {
-      console.warn(`   ⚠️  Error fetching messages for chat ${chatId}:`, error.message);
+      console.warn(`   ⚠️  Error loading messages from MongoDB for chat ${chatId}:`, error.message);
       return [];
     }
   }
@@ -574,9 +545,16 @@ Use this current information to make your conversation starter timely and releva
           
           console.log(`   ✅ Chat ${chatId}: Inactive for ${this.minInactivityMinutes}+ minutes`);
           
-          // Get conversation history for context - only last 2-3 messages
-          const conversationHistory = this.getConversationHistoryForChat(chatId, conversations, 3);
-          console.log(`   📚 Loaded ${conversationHistory.length} previous messages for context`);
+          // Get conversation history for context - only last 2-3 messages from MongoDB
+          // Get latest messages directly from MongoDB for better reliability
+          const latestMessages = await this.db.getLatestMessagesByChat(String(chatId), 3);
+          const conversationHistory = latestMessages.map(msg => ({
+            fromPhone: msg.fromPhone,
+            text: msg.text || '',
+            sentAt: msg.sentAt,
+            isFromSender: this.isFromSender(msg.fromPhone)
+          }));
+          console.log(`   📚 Loaded ${conversationHistory.length} latest messages from MongoDB for context`);
           
           // Detect if this is a group chat by checking chat handles
           const allChatHandles = new Set();
@@ -616,9 +594,11 @@ Use this current information to make your conversation starter timely and releva
             
           // Check if we've already initiated about this specific interest recently (within last hour)
           // This prevents spamming the same interest, but allows different interests
-          const recentlyInitiated = await this.hasRecentlyInitiated(chatId, interest.description, 60); // 60 minutes
+          // TEMPORARILY REDUCED TO 5 MINUTES FOR TESTING
+          const recentlyInitiated = await this.hasRecentlyInitiated(chatId, interest.description, 5); // 5 minutes (reduced from 60 for testing)
           if (recentlyInitiated) {
-            console.log(`   ⏭️  Chat ${chatId}: Already initiated about this interest recently (within last hour)`);
+            console.log(`   ⏭️  Chat ${chatId}: Already initiated about this interest recently (within last 5 minutes)`);
+            console.log(`   💡 To allow more frequent initiations, reduce the cooldown period or clear initiation records in MongoDB`);
             continue;
           }
             
@@ -629,6 +609,12 @@ Use this current information to make your conversation starter timely and releva
             interestDescription = interest.description;
           } else {
             // No shared interests - use generic starter with conversation history
+            // Check if we've sent a generic starter recently
+            const recentlyInitiatedGeneric = await this.hasRecentlyInitiated(chatId, 'generic_starter', 5); // 5 minutes
+            if (recentlyInitiatedGeneric) {
+              console.log(`   ⏭️  Chat ${chatId}: Already sent generic starter recently (within last 5 minutes)`);
+              continue;
+            }
             console.log(`   💭 No shared interests found for chat ${chatId}, using generic conversation starter...`);
             messageText = await this.generateGenericConversationStarter(conversationHistory, isGroupChat);
           }
