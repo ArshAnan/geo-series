@@ -9,12 +9,12 @@ const GoogleSearchService = require('./google-search-service');
 
 class ConversationInitiatorService {
   constructor() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY must be set in .env');
+    if (!process.env.OPENAI_API_MY_KEY) {
+      throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
 
     this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: process.env.OPENAI_API_MY_KEY
     });
 
     this.model = config.openaiModel || 'gpt-4o';

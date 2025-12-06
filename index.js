@@ -162,10 +162,39 @@ class ConversationLogger {
       );
       console.log('✅ Callbacks set up successfully\n');
 
+      // Track key moments extracted in current batch for task analyzer
+      const currentBatchMoments = new Map(); // chatId -> array of moments
+
       this.messageProcessor.setCallback(
         // onBatchReady: send to analyzer
         async (batch) => {
+          // Clear moments for this chat
+          currentBatchMoments.set(batch.chatId, []);
+          
+          // Process with OpenAI analyzer first
           await this.openaiAnalyzer.processBatch(batch);
+          
+          // After key moments are extracted, analyze for tasks with context
+          // Get moments extracted in this batch (plus any existing from storage)
+          const batchKeyMoments = currentBatchMoments.get(batch.chatId) || [];
+          const existingKeyMoments = await this.storageService.loadKeyMoments();
+          const chatExistingMoments = existingKeyMoments.filter(m => m.chatId === batch.chatId);
+          
+          // Combine batch moments with existing moments (avoid duplicates)
+          const allKeyMoments = [...batchKeyMoments];
+          const existingIds = new Set(batchKeyMoments.map(m => `${m.type}-${m.date}-${m.description}`));
+          chatExistingMoments.forEach(m => {
+            const id = `${m.type}-${m.date}-${m.description}`;
+            if (!existingIds.has(id)) {
+              allKeyMoments.push(m);
+            }
+          });
+          
+          // Process batch for task extraction with key moments context
+          await this.taskAnalyzerService.processBatch(batch, allKeyMoments);
+          
+          // Clean up
+          currentBatchMoments.delete(batch.chatId);
         }
       );
 
@@ -175,6 +204,12 @@ class ConversationLogger {
           await this.storageService.storeKeyMoment(moment);
           // Add to notification service for sending to user
           this.notificationService.addKeyMoment(moment);
+          
+          // Track moment for current batch (for task analyzer)
+          if (!currentBatchMoments.has(moment.chatId)) {
+            currentBatchMoments.set(moment.chatId, []);
+          }
+          currentBatchMoments.get(moment.chatId).push(moment);
         }
       );
 

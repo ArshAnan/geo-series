@@ -24,7 +24,7 @@ Create or update your `.env` file in the project root:
 
 ```bash
 # Required
-OPENAI_API_KEY=your-openai-api-key-here
+OPENAI_API_MY_KEY=your-openai-api-key-here
 
 # Kafka Configuration (from your existing setup)
 KAFKA_BROKERS=your-kafka-brokers

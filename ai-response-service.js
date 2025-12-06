@@ -11,12 +11,12 @@ const StorageService = require('./storage-service');
 
 class AIResponseService {
   constructor() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY must be set in .env');
+    if (!process.env.OPENAI_API_MY_KEY) {
+      throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
 
     this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: process.env.OPENAI_API_MY_KEY
     });
 
     this.model = config.openaiModel || 'gpt-4o';
@@ -605,8 +605,8 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       
       // Get past recommendations for this chat to pass to trigger detector
       const pastRecommendations = this.sentRecommendations.get(message.chatId) || [];
-      const recentCutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // Last 7 days
-      const recentPastRecs = pastRecommendations.filter(r => r.timestamp > recentCutoff);
+      const pastRecsCutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // Last 7 days
+      const recentPastRecs = pastRecommendations.filter(r => r.timestamp > pastRecsCutoff);
       
       const triggerResult = await this.triggerDetector.detectTriggers(
         conversationContext, 

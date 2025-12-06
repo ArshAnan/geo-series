@@ -98,7 +98,7 @@ Want to watch together? 🎉
 
 1. **Environment Variables** (in `.env`):
    ```env
-   OPENAI_API_KEY=your-key
+   OPENAI_API_MY_KEY=your-key
    SERIES_API_BASE_URL=your-api-url
    SERIES_API_KEY=your-api-key
    GOOGLE_SEARCH_API_KEY=your-google-key (optional but recommended for matchday)
@@ -293,7 +293,7 @@ service.searchPlaces('FC Barcelona match today schedule').then(r => console.log(
 
 ### Environment Variables:
 
-- `OPENAI_API_KEY` - Required for task extraction
+- `OPENAI_API_MY_KEY` - Required for task extraction
 - `SERIES_API_BASE_URL` - Required for sending reminders
 - `SERIES_API_KEY` - Required for sending reminders
 - `GOOGLE_SEARCH_API_KEY` - Optional, recommended for matchday detection
