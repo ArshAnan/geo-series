@@ -24,6 +24,15 @@ class KafkaEventConsumer {
         mechanism: 'plain',
         username: process.env.KAFKA_SASL_USERNAME,
         password: process.env.KAFKA_SASL_PASSWORD
+      },
+      // Add connection timeout and retry settings
+      connectionTimeout: 10000, // 10 seconds
+      requestTimeout: 30000, // 30 seconds
+      retry: {
+        retries: 8,
+        initialRetryTime: 100,
+        maxRetryTime: 30000,
+        multiplier: 2
       }
     });
 
@@ -162,9 +171,17 @@ class KafkaEventConsumer {
 
       // Check if we should process this message (works for both iMessage and SMS)
       if (!this.shouldProcessMessage(eventData.data)) {
-        console.log(`Skipping message ${eventData.data.id} - doesn't match filter criteria`);
+        const chatHandles = eventData.data.chat_handles || [];
+        const allParticipants = [
+          eventData.data.from_phone,
+          ...chatHandles.map(h => h.identifier || '')
+        ].filter(p => p);
+        
+        console.log(`⚠️  Skipping message ${eventData.data.id} - doesn't match filter criteria`);
         console.log(`  Chat ID: ${eventData.data.chat_id}, From: ${eventData.data.from_phone}`);
+        console.log(`  All participants in chat: ${allParticipants.join(', ')}`);
         console.log(`  Target phones: ${this.targetPhoneNumbers.join(', ') || 'none'}, Target chat: ${this.targetChatId || 'none'}`);
+        console.log(`  ⚠️  NOTE: This only affects message processing in THIS system. Actual message delivery is handled by Series API.`);
         return;
       }
 
@@ -257,6 +274,19 @@ class KafkaEventConsumer {
         eachMessage: async ({ topic, partition, message }) => {
           console.log(`\n📨 Raw message received from Kafka (topic: ${topic}, partition: ${partition}, offset: ${message.offset})`);
           await this.processMessageReceivedEvent(message);
+        },
+        // Add error handling for connection issues
+        eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
+          try {
+            for (const message of batch.messages) {
+              await this.processMessageReceivedEvent(message);
+              await resolveOffset(message.offset);
+              await heartbeat();
+            }
+          } catch (error) {
+            console.error('Error processing batch:', error);
+            // Continue processing other messages
+          }
         }
       });
     } catch (error) {

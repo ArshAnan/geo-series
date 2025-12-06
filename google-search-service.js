@@ -165,7 +165,7 @@ class GoogleSearchService {
   /**
    * Format restaurant recommendations as a message
    */
-  formatRestaurantRecommendations(restaurants, query = null) {
+  formatRestaurantRecommendations(restaurants, query = null, preferences = {}) {
     if (!restaurants || restaurants.length === 0) {
       return `I couldn't find any restaurants matching "${query || 'your request'}". Try adjusting your search!`;
     }
@@ -174,6 +174,15 @@ class GoogleSearchService {
     if (query) {
       message += ` for "${query}"`;
     }
+    
+    // Add personalization based on preferences
+    if (preferences.cuisine) {
+      message += ` (based on your preference for ${preferences.cuisine} food)`;
+    }
+    if (preferences.location) {
+      message += ` in ${preferences.location}`;
+    }
+    
     message += `:\n\n`;
 
     restaurants.forEach((restaurant, index) => {
@@ -203,7 +212,7 @@ class GoogleSearchService {
   /**
    * Format general place/activity recommendations as a message
    */
-  formatPlaceRecommendations(results, query = null) {
+  formatPlaceRecommendations(results, query = null, preferences = {}) {
     if (!results || results.length === 0) {
       return `I couldn't find anything matching "${query || 'your request'}". Try a different search!`;
     }
@@ -212,6 +221,12 @@ class GoogleSearchService {
     if (query) {
       message += ` for "${query}"`;
     }
+    
+    // Add personalization based on preferences
+    if (preferences.location) {
+      message += ` in ${preferences.location}`;
+    }
+    
     message += `:\n\n`;
 
     results.forEach((result, index) => {

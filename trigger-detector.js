@@ -28,38 +28,71 @@ class TriggerDetector {
   /**
    * Analyze conversation history to detect if users need recommendations
    */
-  async detectTriggers(conversationHistory, recentMessage) {
+  async detectTriggers(conversationHistory, recentMessage, pastRecommendations = []) {
     try {
-      // Build context from conversation history (last 20 messages)
-      const recentHistory = conversationHistory.slice(-20);
+      // Use more conversation history (last 50 messages) to better understand context and preferences
+      const recentHistory = conversationHistory.slice(-50);
       const conversationText = recentHistory.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
       }).join('\n');
 
+      // Extract user preferences from conversation history
+      const preferences = this.extractPreferences(conversationHistory);
+      let preferencesContext = '';
+      if (preferences.cuisines.length > 0 || preferences.locations.length > 0 || preferences.mentionedPlaces.length > 0 || pastRecommendations.length > 0) {
+        const pastRecsText = pastRecommendations.length > 0 
+          ? pastRecommendations.slice(0, 3).map(r => `${r.type}: ${r.query}`).join('; ')
+          : 'none';
+        
+        preferencesContext = `\n\nUSER PREFERENCES FROM CONVERSATION HISTORY:
+- Preferred cuisines: ${preferences.cuisines.length > 0 ? preferences.cuisines.join(', ') : 'none mentioned'}
+- Preferred locations: ${preferences.locations.length > 0 ? preferences.locations.join(', ') : 'none mentioned'}
+- Previously mentioned places: ${preferences.mentionedPlaces.length > 0 ? preferences.mentionedPlaces.slice(0, 5).join(', ') : 'none'}
+- Past recommendations sent: ${pastRecsText}
+
+Use this preference context to make better, more personalized recommendations. Avoid repeating past recommendations unless the user explicitly asks for similar places.`;
+
       // Add the current message
       const fullContext = conversationText + `\nUser: ${recentMessage.text || ''}`;
 
-      const prompt = `Analyze this conversation and determine if the users are planning an activity that would benefit from recommendations or search results. Look for:
+      const prompt = `Analyze this conversation and determine if the users are ACTIVELY PLANNING an activity that would benefit from NEW recommendations or search results.
 
-1. **Restaurant/Food planning**: mentions of "going out to eat", "dinner", "lunch", "restaurant", "food", "cuisine", "hungry", "where should we eat", etc.
-2. **Activity planning**: mentions of "things to do", "activities", "places to visit", "where to go", "entertainment", etc.
-3. **Event planning**: mentions of "events", "concerts", "shows", "movies", "theater", etc.
+IMPORTANT CONTEXT RULES:
+- DO NOT trigger if they're just casually discussing food/restaurants without planning to go
+- DO NOT trigger if they're just mentioning preferences ("I like Indian food") without asking for recommendations
+- DO NOT trigger if they're discussing restaurants they already know about
+- DO NOT trigger if recommendations were already provided in this conversation
+- ONLY trigger if they're ACTIVELY PLANNING and ASKING for suggestions (e.g., "where should we eat?", "looking for a restaurant", "need recommendations")
+- Use the user preferences from conversation history to make BETTER, more personalized recommendations
+- If similar recommendations were sent recently, suggest DIFFERENT options or variations
+
+Look for ACTIVE PLANNING indicators:
+1. **Restaurant/Food planning**: Explicit questions like "where should we eat?", "looking for restaurants", "need recommendations", "suggest a place", "going out for dinner" (with planning intent)
+2. **Activity planning**: "things to do", "activities", "places to visit", "where to go", "entertainment" (with planning intent)
+3. **Event planning**: "events", "concerts", "shows", "movies", "theater" (with planning intent)
 
 Respond with a JSON object in this exact format:
 {
   "shouldTrigger": true/false,
   "triggerType": "restaurant" | "food" | "activity" | "place" | "event" | null,
-  "searchQuery": "specific search query string" | null,
+  "searchQuery": "specific search query string enriched with user preferences" | null,
   "location": "location mentioned if any" | null,
   "confidence": 0.0-1.0,
-  "reasoning": "brief explanation"
+  "reasoning": "brief explanation",
+  "preferences": {
+    "cuisine": "preferred cuisine type if mentioned" | null,
+    "location": "preferred location if mentioned" | null,
+    "priceRange": "budget/preference if mentioned" | null
+  }
 }
 
-If no trigger is detected, set "shouldTrigger" to false. Be specific with search queries - extract the actual intent (e.g., if they say "want to go out for sushi", the query should be "sushi restaurant").
+If no trigger is detected, set "shouldTrigger" to false. Be specific with search queries - extract the actual intent AND incorporate user preferences from conversation history (e.g., if they previously mentioned liking Indian food and now ask "where should we eat?", the query should be "Indian restaurant" or similar).
+
+CRITICAL: Only trigger if they're ACTIVELY ASKING for recommendations or planning to go somewhere. If they're just chatting about food preferences or discussing restaurants they know, set "shouldTrigger" to false. Be conservative - it's better to miss a trigger than to spam recommendations.
 
 Conversation:
-${fullContext}
+${fullContext}${preferencesContext}
 
 JSON Response:`;
 
@@ -76,7 +109,7 @@ JSON Response:`;
             content: prompt
           }
         ],
-        temperature: 0.3
+        temperature: 0.2 // Lower temperature for more conservative detection
       };
 
       // Only add response_format if model supports it (using same logic as openai-analyzer)
@@ -123,9 +156,10 @@ JSON Response:`;
         };
       }
 
-      // Only trigger if confidence is high enough (0.6+)
-      if ((result.confidence || 0) < 0.6) {
-        console.log(`🔍 Trigger detected but confidence too low (${result.confidence} < 0.6)`);
+      // Only trigger if confidence is high enough (0.75+) - increased threshold
+      if ((result.confidence || 0) < 0.75) {
+        console.log(`🔍 Trigger detected but confidence too low (${result.confidence} < 0.75)`);
+        console.log(`   Reasoning: ${result.reasoning || 'No reasoning provided'}`);
         return {
           shouldTrigger: false,
           triggerType: result.triggerType,
@@ -206,6 +240,83 @@ JSON Response:`;
     }
 
     return null;
+  }
+
+  /**
+   * Extract user preferences from conversation history
+   * This helps make better, more personalized recommendations
+   */
+  extractPreferences(conversationHistory) {
+    const preferences = {
+      cuisines: [],
+      locations: [],
+      mentionedPlaces: []
+    };
+
+    // Analyze last 100 messages for preferences
+    const historyToAnalyze = conversationHistory.slice(-100);
+    
+    // Common cuisine types
+    const cuisineKeywords = [
+      'indian', 'italian', 'chinese', 'japanese', 'mexican', 'thai', 'korean',
+      'french', 'mediterranean', 'american', 'pizza', 'sushi', 'bbq', 'steak',
+      'seafood', 'vegetarian', 'vegan', 'halal', 'kosher', 'mexican', 'tacos',
+      'burgers', 'pasta', 'ramen', 'curry', 'sushi', 'sashimi'
+    ];
+
+    // Extract cuisines mentioned
+    historyToAnalyze.forEach(msg => {
+      const text = (msg.content || '').toLowerCase();
+      cuisineKeywords.forEach(cuisine => {
+        if (text.includes(cuisine) && !preferences.cuisines.includes(cuisine)) {
+          preferences.cuisines.push(cuisine);
+        }
+      });
+    });
+
+    // Extract locations mentioned
+    const locationPatterns = [
+      /(?:in|near|at|around|to)\s+([A-Z][a-zA-Z\s]+(?:City|Town|NYC|NY|CA|LA|SF|San Francisco|New York|Los Angeles|Brooklyn|Manhattan|Queens|Bronx|Staten Island)?)/gi,
+      /\b(NYC|NY|New York|Los Angeles|LA|San Francisco|SF|Chicago|Houston|Phoenix|Philadelphia|San Antonio|San Diego|Dallas|San Jose|Austin|Jacksonville|Fort Worth|Columbus|Charlotte|Indianapolis|Seattle|Denver|Washington|Boston|Brooklyn|Manhattan|Queens|Bronx)\b/gi
+    ];
+
+    historyToAnalyze.forEach(msg => {
+      const text = msg.content || '';
+      locationPatterns.forEach(pattern => {
+        const matches = text.matchAll(pattern);
+        for (const match of matches) {
+          const location = match[1] || match[0];
+          if (location && !preferences.locations.includes(location)) {
+            preferences.locations.push(location);
+          }
+        }
+      });
+    });
+
+    // Extract restaurant/place names (capitalized words that might be place names)
+    historyToAnalyze.forEach(msg => {
+      const text = msg.content || '';
+      // Look for patterns like "Let's go to [Place Name]" or "[Place Name] is good"
+      const placePatterns = [
+        /(?:at|to|from|went to|tried|visited|liked|love|enjoyed)\s+([A-Z][a-zA-Z\s&']{2,})/g,
+        /"([A-Z][a-zA-Z\s&']{2,})"/g
+      ];
+      
+      placePatterns.forEach(pattern => {
+        const matches = text.matchAll(pattern);
+        for (const match of matches) {
+          const place = match[1].trim();
+          // Filter out common words that aren't places
+          if (place && place.length > 2 && 
+              !['The', 'This', 'That', 'There', 'Here', 'Where', 'What', 'When', 'How'].includes(place.split(' ')[0]) &&
+              !preferences.mentionedPlaces.includes(place)) {
+            preferences.mentionedPlaces.push(place);
+          }
+        }
+      });
+    });
+
+    return preferences;
   }
 }
 

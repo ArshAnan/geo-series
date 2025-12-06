@@ -73,3 +73,4 @@ async function ensureTopicsExist() {
 }
 
 module.exports = { ensureTopicsExist, INTERNAL_TOPICS };
+

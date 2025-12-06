@@ -156,3 +156,4 @@ Press `Ctrl+C` in the terminal where `node index.js` is running. The system will
 - Read `README.md` for full documentation
 - See `GOOGLE_API_SETUP.md` to enable smart recommendations
 - Check `SMART_RECOMMENDATIONS.md` for feature details
+

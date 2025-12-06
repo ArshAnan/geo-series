@@ -199,5 +199,253 @@
     "eventType": "message.received",
     "createdAt": "2025-12-06T01:01:15-06:00",
     "storedAt": "2025-12-06T07:01:15.925Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53640248",
+    "fromPhone": "+12014927091",
+    "text": "Wassup",
+    "sentAt": "2025-12-06 01:21:35 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "cdc1b523-7978-46e1-937d-807c56aab7a9",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T01:21:36-06:00",
+    "storedAt": "2025-12-06T07:21:37.087Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53643552",
+    "fromPhone": "+19294265300",
+    "text": "Hey",
+    "sentAt": "2025-12-06 01:27:00 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "SMS",
+    "eventId": "51f120d5-48be-4e88-87d2-6d99d01257b2",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T01:27:05-06:00",
+    "storedAt": "2025-12-06T07:27:05.771Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53665299",
+    "fromPhone": "+19294265300",
+    "text": "Create a task for me",
+    "sentAt": "2025-12-06 02:05:22 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "30e3ca80-3777-4ec8-8533-cf438ccc6043",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:05:24-06:00",
+    "storedAt": "2025-12-06T08:05:24.779Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53665827",
+    "fromPhone": "+12014927091",
+    "text": "Hi",
+    "sentAt": "2025-12-06 02:06:19 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "4dd852bd-aec7-4554-b0d9-8c30f2b7f178",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:06:20-06:00",
+    "storedAt": "2025-12-06T08:06:21.108Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53665997",
+    "fromPhone": "+19294265300",
+    "text": "Hey Rahul",
+    "sentAt": "2025-12-06 02:06:33 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "a565953c-aca3-4dc2-b775-947f221a7130",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:06:35-06:00",
+    "storedAt": "2025-12-06T08:06:35.321Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53666322",
+    "fromPhone": "+12014927091",
+    "text": "It's good, i like Barcelona",
+    "sentAt": "2025-12-06 02:07:04 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "767dc11f-ec7a-46b7-bfda-0d1a742ff43c",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:07:07-06:00",
+    "storedAt": "2025-12-06T08:07:07.399Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53668729",
+    "fromPhone": "+12014927091",
+    "text": "Hey",
+    "sentAt": "2025-12-06 02:11:14 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "6a78b63a-a66c-4666-b0a0-39d65a67c66d",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:11:17-06:00",
+    "storedAt": "2025-12-06T08:11:17.125Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53673225",
+    "fromPhone": "+19294265300",
+    "text": "I think ice hockey is the next big thing. Every country with or without ice should play ice hockey",
+    "sentAt": "2025-12-06 02:19:25 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "fe2042b0-40b0-4c00-b9f2-abca4bc83226",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:19:26-06:00",
+    "storedAt": "2025-12-06T08:19:26.530Z"
   }
 ]

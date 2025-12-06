@@ -36,12 +36,14 @@ class OpenAIAnalyzer {
 Conversation:
 ${messages}
 
-Please identify and extract the following types of moments:
-1. First meeting/contact - When did they first start talking?
-2. Shared interests - What hobbies, anime, shows, topics do they both like?
-3. Important dates/events - Birthdays, anniversaries, special events mentioned
-4. Relationship milestones - First time they did something together, inside jokes, memorable moments
-5. Personal preferences - Food preferences, favorite things, etc.
+Please identify and extract the following types of moments (be generous - capture even small moments):
+1. First meeting/contact - When did they first start talking? (even a simple greeting counts)
+2. Shared interests - What hobbies, anime, shows, topics do they both like? (even a single mention or agreement counts)
+3. Important dates/events - Birthdays, anniversaries, special events mentioned (any date or event reference)
+4. Relationship milestones - First time they did something together, inside jokes, memorable moments (any positive interaction)
+5. Personal preferences - Food preferences, favorite things, etc. (any preference mentioned)
+
+IMPORTANT: Be lenient and capture moments even if they seem small. For a hackathon demo, we want to show activity. Extract moments with lower confidence thresholds - even 0.3-0.4 confidence is acceptable.
 
 Return your analysis as a JSON array of moment objects. Each moment should have:
 - type: one of "first_contact", "shared_interest", "important_date", "milestone", "preference"
@@ -49,7 +51,7 @@ Return your analysis as a JSON array of moment objects. Each moment should have:
 - date: The date when this moment occurred (ISO format if possible, or approximate)
 - participants: Array of phone numbers involved
 - context: Relevant conversation context or quote
-- confidence: Your confidence level (0.0 to 1.0)
+- confidence: Your confidence level (0.0 to 1.0) - can be as low as 0.3 for small moments
 
 Return ONLY valid JSON, no other text. Format:
 [
@@ -106,7 +108,7 @@ Return ONLY valid JSON, no other text. Format:
             content: prompt
           }
         ],
-        temperature: 0.3 // Lower temperature for more consistent extraction
+        temperature: 0.5 // Slightly higher temperature for more creative/lenient extraction
       };
 
       // Only add response_format if model supports it
@@ -144,15 +146,17 @@ Return ONLY valid JSON, no other text. Format:
         }
       }
 
-      // Validate and enrich moments
+      // Validate and enrich moments (lower bar - accept moments with confidence >= 0.2)
       const validatedMoments = moments
-        .filter(m => m && m.type && m.description)
+        .filter(m => m && m.type && m.description && (m.confidence === undefined || m.confidence >= 0.2))
         .map(moment => ({
           ...moment,
           chatId: conversationBatch.chatId,
           extractedAt: new Date().toISOString(),
           conversationTimeRange: conversationBatch.timeRange,
-          messageCount: conversationBatch.messageCount
+          messageCount: conversationBatch.messageCount,
+          // Ensure minimum confidence of 0.3 if not provided
+          confidence: moment.confidence !== undefined ? moment.confidence : 0.3
         }));
 
       return validatedMoments;

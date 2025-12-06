@@ -57,3 +57,4 @@ node debug-consumer.js
 - The system starts monitoring from the latest messages (won't capture historical messages before startup)
 - To capture historical messages, change `fromBeginning: false` to `fromBeginning: true` in `kafka-event-consumer.js`
 - Group chats are automatically detected and monitored if they contain any target phone number
+

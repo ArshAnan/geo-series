@@ -37,6 +37,10 @@ class StorageService {
   async appendConversation(message) {
     try {
       console.log(`📝 Storage: Attempting to store message ${message.messageId}...`);
+      console.log(`   Chat ID: ${message.chatId}`);
+      console.log(`   From: ${message.fromPhone}`);
+      console.log(`   Text: ${(message.text || '').substring(0, 50)}${(message.text || '').length > 50 ? '...' : ''}`);
+      
       // Read existing conversations
       const conversations = await fs.readJson(this.conversationsFile);
       
@@ -66,10 +70,12 @@ class StorageService {
       console.log(`✅ Storage: Successfully stored conversation message ${message.messageId}`);
       console.log(`   File: ${this.conversationsFile}`);
       console.log(`   Total conversations: ${conversations.length}`);
+      console.log(`   This message will be used for better recommendations!`);
     } catch (error) {
       console.error('❌ Storage: Error appending conversation:', error);
       console.error('   Message ID:', message.messageId);
       console.error('   Error details:', error.stack);
+      throw error; // Re-throw to help with debugging
     }
   }
 
@@ -126,6 +132,22 @@ class StorageService {
 
   async storeKeyMoment(moment) {
     await this.appendKeyMoment(moment);
+  }
+
+  /**
+   * Load key moments from storage (for task analyzer context)
+   */
+  async loadKeyMoments() {
+    try {
+      if (await fs.pathExists(this.keyMomentsFile)) {
+        const moments = await fs.readJson(this.keyMomentsFile);
+        return moments || [];
+      }
+      return [];
+    } catch (error) {
+      console.error('Error loading key moments:', error);
+      return [];
+    }
   }
 
   async stop() {

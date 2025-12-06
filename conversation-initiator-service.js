@@ -102,7 +102,7 @@ class ConversationInitiatorService {
     return keyMoments.filter(moment => 
       moment.chatId === chatId && 
       moment.type === 'shared_interest' &&
-      moment.confidence >= 0.7 // Only high-confidence shared interests
+      moment.confidence >= 0.3 // Lower threshold for hackathon - capture more moments
     );
   }
 

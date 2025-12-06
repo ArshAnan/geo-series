@@ -1,13 +1,17 @@
 {
-  "targetPhoneNumbers": ["+16463458837", "+19294265300", "+12014927092"],
+  "targetPhoneNumbers": ["+16463458837", "+19294265300", "+12014927091"],
   "chatId": null,
   "batchingWindowMinutes": 0.25,
   "openaiModel": "gpt-4o",
-  "minMessagesForAnalysis": 3,
+  "minMessagesForAnalysis": 1,
   "senderPhoneNumber": "+16463458837",
   "conversationInactivityMinutes": 30,
   "notificationPhoneNumber": null,
   "conversationInitiatorIntervalMinutes": 2,
   "conversationInitiatorMinInactivityMinutes": 2,
-  "conversationInitiatorMaxFrequency": 1
+  "conversationInitiatorMaxFrequency": 1,
+  "taskSchedulerCheckIntervalSeconds": 60,
+  "taskReminderTimeWindowMinutes": 5,
+  "aiResponseMinIntervalMinutes": 5,
+  "aiResponseConfidenceThreshold": 0.85
 }

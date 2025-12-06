@@ -159,3 +159,4 @@ Potential improvements:
 - Personalized recommendations based on conversation history
 - Multi-language support
 - Better location extraction and geocoding
+

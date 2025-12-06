@@ -142,3 +142,4 @@ if (require.main === module) {
 }
 
 module.exports = testNotifications;
+

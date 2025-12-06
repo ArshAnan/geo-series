@@ -8,6 +8,8 @@ const StorageService = require('./storage-service');
 const NotificationService = require('./notification-service');
 const AIResponseService = require('./ai-response-service');
 const ConversationInitiatorService = require('./conversation-initiator-service');
+const TaskAnalyzerService = require('./task-analyzer-service');
+const TaskSchedulerService = require('./task-scheduler-service');
 const config = require('./config.json');
 const fs = require('fs-extra');
 const path = require('path');
@@ -22,6 +24,8 @@ class ConversationLogger {
     this.notificationService = null;
     this.aiResponseService = null;
     this.conversationInitiatorService = null;
+    this.taskAnalyzerService = null;
+    this.taskSchedulerService = null;
     this.shutdownHandlers = [];
   }
 
@@ -125,6 +129,8 @@ class ConversationLogger {
       this.notificationService = new NotificationService();
       this.aiResponseService = new AIResponseService();
       this.conversationInitiatorService = new ConversationInitiatorService();
+      this.taskAnalyzerService = new TaskAnalyzerService();
+      this.taskSchedulerService = new TaskSchedulerService();
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
       console.log('🔗 Setting up callbacks...');
@@ -144,6 +150,14 @@ class ConversationLogger {
         async (message) => {
           console.log(`💾 Storage callback triggered for message ${message.messageId}`);
           await this.storageService.storeConversation(message);
+          // Reload conversation history in AI response service to use new message for recommendations
+          // This ensures recommendations use the latest logged conversations
+          try {
+            await this.aiResponseService.loadConversationHistory();
+            console.log(`🔄 Reloaded conversation history after storing new message`);
+          } catch (error) {
+            console.warn('Error reloading conversation history after storage:', error.message);
+          }
         }
       );
       console.log('✅ Callbacks set up successfully\n');
@@ -164,6 +178,14 @@ class ConversationLogger {
         }
       );
 
+      // Wire up task analyzer to process batches and extract tasks
+      this.taskAnalyzerService.setCallback(
+        // onTaskExtracted: store task
+        async (task) => {
+          await this.taskSchedulerService.storeTask(task);
+        }
+      );
+
       // Start services (they run in parallel)
       console.log('\nStarting services...');
       await Promise.all([
@@ -173,7 +195,9 @@ class ConversationLogger {
         this.storageService.start(),
         this.notificationService.start(),
         this.aiResponseService.start(),
-        this.conversationInitiatorService.start()
+        this.conversationInitiatorService.start(),
+        this.taskAnalyzerService.start(),
+        this.taskSchedulerService.start()
       ]);
 
       console.log('\n✓ All services started successfully!');
@@ -236,6 +260,12 @@ class ConversationLogger {
     }
     if (this.conversationInitiatorService) {
       stopPromises.push(this.conversationInitiatorService.stop());
+    }
+    if (this.taskAnalyzerService) {
+      stopPromises.push(this.taskAnalyzerService.stop());
+    }
+    if (this.taskSchedulerService) {
+      stopPromises.push(this.taskSchedulerService.stop());
     }
 
     await Promise.all(stopPromises);
