@@ -1,0 +1,110 @@
+[
+  {
+    "chatId": "test-chat-123",
+    "messageId": "test-msg-1764988601006",
+    "fromPhone": "+19294265300",
+    "text": "This is a test message",
+    "sentAt": "2025-12-06T02:36:41.006Z",
+    "chatHandles": [],
+    "attachments": [],
+    "isRead": false,
+    "service": "iMessage",
+    "eventId": "test-event-123",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:36:41.007Z",
+    "storedAt": "2025-12-06T02:36:41.008Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53530210",
+    "fromPhone": "+19294265300",
+    "text": "Let’s go to an AI event in NYC in 2026",
+    "sentAt": "2025-12-05 22:52:09 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "d2f3fd5a-56c3-4a9a-a9ed-5ebae13f581b",
+    "eventType": "message.received",
+    "createdAt": "2025-12-05T22:52:09-06:00",
+    "storedAt": "2025-12-06T04:52:10.085Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53531479",
+    "fromPhone": "+19294265300",
+    "text": "How about a restaurant in NYC",
+    "sentAt": "2025-12-05 22:53:33 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "19700a10-e3aa-4e87-ba33-8e93e23a0f72",
+    "eventType": "message.received",
+    "createdAt": "2025-12-05T22:53:34-06:00",
+    "storedAt": "2025-12-06T04:53:34.905Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53532659",
+    "fromPhone": "+19294265300",
+    "text": "I want an Indian restaurant in NYC. Can you suggest me a place",
+    "sentAt": "2025-12-05 22:55:02 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "15c7c06f-f43c-4ab8-89fe-0fbc2646a811",
+    "eventType": "message.received",
+    "createdAt": "2025-12-05T22:55:05-06:00",
+    "storedAt": "2025-12-06T04:55:05.929Z"
+  }
+]

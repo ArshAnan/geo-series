@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "kafkajs": "^2.2.4",
+    "openai": "^4.20.0",
+    "axios": "^1.6.2",
+    "fs-extra": "^11.2.0"
+  }
+}
