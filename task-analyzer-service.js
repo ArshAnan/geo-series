@@ -21,6 +21,7 @@ class TaskAnalyzerService {
     this.targetChatId = targetChatId || config.chatId; // Only analyze target chat ID
     this.tasksFile = path.join(__dirname, 'logs', 'tasks.json');
     this.onTaskExtractedCallback = null;
+    this.aiResponseService = null; // Will be set from index.js to send notifications
     
     // Initialize tasks file
     this.initializeFiles();
@@ -299,13 +300,53 @@ Return ONLY valid JSON, no other text. Format:
       }
 
       // Send tasks via callback
+      const createdTasks = [];
       for (const task of tasks) {
         if (this.onTaskExtractedCallback) {
           await this.onTaskExtractedCallback(task);
+          createdTasks.push(task);
         }
       }
 
       console.log(`✅ Extracted ${tasks.length} task(s) for chat ${conversationBatch.chatId}`);
+
+      // Send notification to user about the tasks that were created
+      if (createdTasks.length > 0 && this.aiResponseService) {
+        try {
+          // Get the most recent message from the batch to use for notification context
+          const latestMessage = conversationBatch.messages.length > 0 
+            ? conversationBatch.messages[conversationBatch.messages.length - 1]
+            : null;
+          
+          if (latestMessage) {
+            // Ensure message has required fields for notification
+            const notificationMessage = {
+              chatId: latestMessage.chatId || conversationBatch.chatId,
+              messageId: latestMessage.messageId || `task-notification-${Date.now()}`,
+              fromPhone: latestMessage.fromPhone,
+              text: latestMessage.text || '',
+              sentAt: latestMessage.sentAt || new Date().toISOString(),
+              chatHandles: latestMessage.chatHandles || [],
+              attachments: latestMessage.attachments || [],
+              isRead: latestMessage.isRead || false,
+              service: latestMessage.service || 'iMessage'
+            };
+            
+            console.log(`📤 Sending task notification for ${createdTasks.length} task(s)...`);
+            console.log(`   Chat ID: ${notificationMessage.chatId}`);
+            await this.aiResponseService.sendTaskNotification(notificationMessage, createdTasks);
+          } else {
+            console.warn(`⚠️  No message found in batch to use for task notification`);
+          }
+        } catch (error) {
+          console.error('❌ Error sending task notification:', error);
+          console.error('   Error details:', error.message);
+          console.error('   Tasks were still created and stored, but notification failed');
+        }
+      } else if (createdTasks.length > 0 && !this.aiResponseService) {
+        console.warn(`⚠️  AI response service not set - cannot send task notification`);
+        console.warn(`   Tasks were created but user won't be notified`);
+      }
     } catch (error) {
       console.error('Error processing batch for tasks:', error);
     }

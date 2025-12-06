@@ -742,37 +742,100 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
    * Send a notification message when tasks are created
    * Uses LLM to generate a natural, human-like response based on the task context
    */
+  /**
+   * Format schedule information in a user-friendly way
+   */
+  formatScheduleInfo(task) {
+    const schedule = task.schedule || {};
+    const scheduleType = schedule.type || 'custom';
+    
+    switch (scheduleType) {
+      case 'matchday':
+        if (task.metadata?.teamName) {
+          return `I'll remind you before ${task.metadata.teamName} matches`;
+        }
+        return `I'll remind you before match days`;
+      
+      case 'daily':
+        const time = schedule.time || 'morning';
+        const timeStr = time.includes(':') 
+          ? (() => {
+              const [hours, mins] = time.split(':');
+              const hour = parseInt(hours);
+              const ampm = hour >= 12 ? 'PM' : 'AM';
+              const displayHour = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+              return `${displayHour}:${mins} ${ampm}`;
+            })()
+          : time;
+        return `I'll check in with you daily at ${timeStr}`;
+      
+      case 'weekly':
+        const days = schedule.daysOfWeek || [];
+        if (days.length > 0) {
+          const dayNames = days.map(d => d.charAt(0).toUpperCase() + d.slice(1));
+          if (dayNames.length === 1) {
+            return `I'll check in with you every ${dayNames[0]}`;
+          } else if (dayNames.length === 2) {
+            return `I'll check in with you every ${dayNames[0]} and ${dayNames[1]}`;
+          } else {
+            return `I'll check in with you on ${dayNames.slice(0, -1).join(', ')}, and ${dayNames[dayNames.length - 1]}`;
+          }
+        }
+        return `I'll check in with you weekly`;
+      
+      case 'event_based':
+        if (schedule.eventDate) {
+          const eventDate = new Date(schedule.eventDate);
+          const reminderDays = schedule.reminderDaysBefore || 1;
+          return `I'll remind you ${reminderDays} day${reminderDays > 1 ? 's' : ''} before the event`;
+        }
+        return `I'll remind you before the event`;
+      
+      default:
+        return `I'll remind you about this`;
+    }
+  }
+
   async sendTaskNotification(message, tasks) {
     try {
-      // Generate a natural, human-like notification using LLM
-      const taskDescriptions = tasks.map((task, idx) => {
-        return `${idx + 1}. ${task.title}${task.context ? ` (${task.context})` : ''}`;
+      // Build task list with schedule information
+      const taskList = tasks.map((task, idx) => {
+        const scheduleInfo = this.formatScheduleInfo(task);
+        let taskLine = `• ${task.title}`;
+        if (task.metadata?.teamName) {
+          taskLine += ` (${task.metadata.teamName})`;
+        }
+        taskLine += ` - ${scheduleInfo}`;
+        return taskLine;
       }).join('\n');
 
-      const prompt = `You're texting a friend about something you just noted. Generate a natural, casual text message (1-2 sentences max) acknowledging the task(s) that were just mentioned in the conversation.
+      // Generate a natural, human-like notification using LLM
+      const prompt = `You're texting a friend about tasks you just noted. Generate a natural, casual text message that:
+1. Acknowledges the task(s) that were just mentioned
+2. Lists what tasks you're tracking
+3. Mentions when you'll remind them
 
 Rules:
 - Be casual and friendly, like texting a friend
 - Don't use formal language like "Noted" or "I'll keep you updated"
 - Make it feel natural and conversational
-- If it's about sports/matches, reference the specific team/match naturally
-- If it's about an event, mention it casually
-- Use emojis sparingly (maybe 1 if it fits naturally)
-- Keep it short and human-like
+- Include the task list and when you'll remind them
+- Use emojis sparingly (maybe 1-2 if they fit naturally)
+- Keep it concise but informative (2-4 sentences)
 
-Task(s) mentioned:
-${taskDescriptions}
+Task(s) you're tracking:
+${taskList}
 
 User's message that triggered this: "${message.text}"
 
-Generate a natural, casual text message:`;
+Generate a natural, casual text message that mentions the tasks and when you'll remind them:`;
 
       const response = await this.openai.chat.completions.create({
         model: this.model,
         messages: [
           {
             role: 'system',
-            content: 'You are a friendly person texting a friend. Generate natural, casual text messages. Keep responses short (1-2 sentences) and conversational.'
+            content: 'You are a friendly person texting a friend. Generate natural, casual text messages that inform them about tasks you\'re tracking and when you\'ll remind them. Keep responses conversational but informative (2-4 sentences).'
           },
           {
             role: 'user',
@@ -780,25 +843,30 @@ Generate a natural, casual text message:`;
           }
         ],
         temperature: 0.8,
-        max_tokens: 100
+        max_tokens: 200
       });
 
       let notificationText = response.choices[0].message.content.trim();
       
       // Fallback if LLM response is too long or weird
-      if (!notificationText || notificationText.length > 200) {
-        // Simple fallback based on task type
+      if (!notificationText || notificationText.length > 500) {
+        // Fallback with task details
         if (tasks.length === 1) {
           const task = tasks[0];
+          const scheduleInfo = this.formatScheduleInfo(task);
           if (task.category === 'sports' && task.metadata?.teamName) {
-            notificationText = `Sounds good! I'll remind you about ${task.metadata.teamName} matches 🏆`;
+            notificationText = `Got it! I'm tracking: ${task.title} (${task.metadata.teamName}). ${scheduleInfo} 🏆`;
+          } else if (task.category === 'goal') {
+            notificationText = `Sounds good! I'm tracking: ${task.title}. ${scheduleInfo} 💪`;
           } else if (task.category === 'event') {
-            notificationText = `Got it! I'll remind you about that 👍`;
+            notificationText = `Got it! I'm tracking: ${task.title}. ${scheduleInfo} 📅`;
           } else {
-            notificationText = `Sounds good! I'll keep that in mind 😊`;
+            notificationText = `Sounds good! I'm tracking: ${task.title}. ${scheduleInfo} 👍`;
           }
         } else {
-          notificationText = `Got it! I'll remind you about these 👍`;
+          // Multiple tasks - create a simple list
+          const taskTitles = tasks.map(t => `• ${t.title}`).join('\n');
+          notificationText = `Got it! I'm tracking these:\n${taskTitles}\n\nI'll remind you based on their schedules 👍`;
         }
       }
 
@@ -820,11 +888,17 @@ Generate a natural, casual text message:`;
       await this.storeAIResponse(message.chatId, notificationText, messageId);
     } catch (error) {
       console.error('Error sending task notification:', error);
-      // Fallback to simple message if LLM fails
+      // Fallback to simple message with task details if LLM fails
       try {
-        const fallbackMessage = tasks.length === 1 
-          ? `Sounds good! I'll keep that in mind 👍`
-          : `Got it! I'll remind you about these 👍`;
+        let fallbackMessage = '';
+        if (tasks.length === 1) {
+          const task = tasks[0];
+          const scheduleInfo = this.formatScheduleInfo(task);
+          fallbackMessage = `Got it! I'm tracking: ${task.title}. ${scheduleInfo} 👍`;
+        } else {
+          const taskTitles = tasks.map(t => `• ${t.title}`).join('\n');
+          fallbackMessage = `Got it! I'm tracking these:\n${taskTitles}\n\nI'll remind you based on their schedules 👍`;
+        }
         await this.apiClient.sendMessage(message.chatId, fallbackMessage, [], this.senderPhoneNumber);
       } catch (fallbackError) {
         console.error('Error sending fallback notification:', fallbackError);

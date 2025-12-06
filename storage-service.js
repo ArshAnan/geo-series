@@ -47,8 +47,18 @@ class StorageService {
 
   // Public methods to be called directly
   async storeConversation(message) {
-    // Conversations are fetched on-demand from API, not stored
-    await this.appendConversation(message);
+    try {
+      // Ensure database is connected (connect() handles reconnection automatically)
+      await this.db.connect();
+      // Conversations are fetched on-demand from API, not stored
+      await this.appendConversation(message);
+    } catch (error) {
+      console.error('❌ Error in storeConversation:', error);
+      console.error('   Message ID:', message.messageId);
+      console.error('   Error details:', error.message);
+      console.error('   Error stack:', error.stack);
+      throw error; // Re-throw so caller can handle it
+    }
   }
 
   async storeKeyMoment(moment) {

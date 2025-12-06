@@ -132,6 +132,8 @@ class ConversationLogger {
       this.aiResponseService = new AIResponseService(chatId);
       // Set task analyzer reference in AI response service for task creation
       this.aiResponseService.taskAnalyzer = this.taskAnalyzerService;
+      // Set AI response service reference in task analyzer for sending notifications
+      this.taskAnalyzerService.aiResponseService = this.aiResponseService;
       this.conversationInitiatorService = new ConversationInitiatorService(chatId);
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
@@ -150,18 +152,44 @@ class ConversationLogger {
         },
         // onMessageStored: store conversation immediately
         async (message) => {
-          console.log(`💾 Storage callback triggered for message ${message.messageId}`);
-          await this.storageService.storeConversation(message);
-          // Reload conversation history in AI response service to use new message for recommendations
-          // This ensures recommendations use the latest logged conversations
           try {
-            await this.aiResponseService.loadConversationHistory();
-            console.log(`🔄 Reloaded conversation history after storing new message`);
+            console.log(`💾 Storage callback triggered for message ${message.messageId}`);
+            console.log(`   Chat ID: ${message.chatId}`);
+            console.log(`   From: ${message.fromPhone}`);
+            console.log(`   Text: "${(message.text || '').substring(0, 50)}${(message.text || '').length > 50 ? '...' : ''}"`);
+            
+            await this.storageService.storeConversation(message);
+            console.log(`✅ Successfully stored message ${message.messageId} to MongoDB`);
+            
+            // Reload conversation history in AI response service to use new message for recommendations
+            // This ensures recommendations use the latest logged conversations
+            try {
+              await this.aiResponseService.loadConversationHistory();
+              console.log(`🔄 Reloaded conversation history after storing new message`);
+            } catch (error) {
+              console.warn('⚠️  Error reloading conversation history after storage:', error.message);
+              console.warn('   Stack:', error.stack);
+            }
           } catch (error) {
-            console.warn('Error reloading conversation history after storage:', error.message);
+            console.error(`❌ CRITICAL: Error in storage callback for message ${message.messageId}:`, error);
+            console.error(`   Error message: ${error.message}`);
+            console.error(`   Error stack:`, error.stack);
+            console.error(`   This message may not be logged!`);
+            // Don't throw - we want to continue processing other messages
           }
         }
       );
+      
+      // Verify callbacks are set
+      if (!this.eventConsumer.onMessageCallback) {
+        console.error('❌ CRITICAL: onMessageCallback not set!');
+      }
+      if (!this.eventConsumer.onMessageStoredCallback) {
+        console.error('❌ CRITICAL: onMessageStoredCallback not set! Messages will NOT be logged!');
+      } else {
+        console.log('✅ Message storage callback verified');
+      }
+      
       console.log('✅ Callbacks set up successfully\n');
 
       // Track key moments extracted in current batch for task analyzer

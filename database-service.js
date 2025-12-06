@@ -12,8 +12,23 @@ class DatabaseService {
   }
 
   async connect() {
-    if (this.isConnected) {
-      return;
+    // If already connected, verify connection is still alive
+    if (this.isConnected && this.client) {
+      try {
+        // Ping the database to verify connection
+        await this.db.admin().ping();
+        return;
+      } catch (error) {
+        console.warn('⚠️  MongoDB connection lost, reconnecting...');
+        this.isConnected = false;
+        if (this.client) {
+          try {
+            await this.client.close();
+          } catch (closeError) {
+            // Ignore close errors
+          }
+        }
+      }
     }
 
     try {
@@ -28,6 +43,7 @@ class DatabaseService {
       console.log(`✅ Connected to MongoDB: ${this.dbName}`);
     } catch (error) {
       console.error('❌ MongoDB connection error:', error);
+      this.isConnected = false;
       throw error;
     }
   }
