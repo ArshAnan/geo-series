@@ -289,8 +289,44 @@ class KafkaEventConsumer {
         return;
       }
 
+      // Normalize message first (needed for storage and processing)
+      const normalizedMessage = this.normalizeMessage(eventData);
+
+      // IMPORTANT: Store ALL messages before filtering
+      // This ensures every message is logged for better recommendations
+      // Only messages that pass the filter will be processed (analyzed, responded to)
+      // We always try to store (MongoDB uses upsert to handle duplicates safely)
+      if (this.onMessageStoredCallback) {
+        try {
+          const isMessageProcessed = await this.db.isMessageProcessed(eventData.data.id);
+          if (isMessageProcessed || this.processedMessageIds.has(eventData.data.id)) {
+            console.log(`   ℹ️  Message ${normalizedMessage.messageId} may already be stored, but ensuring it's in database...`);
+          } else {
+            console.log(`💾 Storing NEW message ${normalizedMessage.messageId} (before filter check)...`);
+          }
+          console.log(`   Chat ID: ${normalizedMessage.chatId}`);
+          console.log(`   From: ${normalizedMessage.fromPhone}`);
+          console.log(`   Text: "${(normalizedMessage.text || '').substring(0, 50)}${(normalizedMessage.text || '').length > 50 ? '...' : ''}"`);
+          
+          await this.onMessageStoredCallback(normalizedMessage);
+          console.log(`✅ Message ${normalizedMessage.messageId} stored/verified in MongoDB - will be used for recommendations`);
+        } catch (error) {
+          console.error(`❌ Error storing message ${normalizedMessage.messageId}:`, error);
+          console.error(`   Error message: ${error.message}`);
+          console.error(`   Error stack:`, error.stack);
+          // Continue processing even if storage fails (but log the error)
+        }
+      } else {
+        console.error(`⚠️  ⚠️  ⚠️  CRITICAL: NO onMessageStoredCallback SET! Message ${normalizedMessage.messageId} won't be stored! ⚠️  ⚠️  ⚠️`);
+        console.error(`   This means messages are NOT being logged. Check index.js to ensure callbacks are set up correctly.`);
+      }
+
       // Check if we should process this message (works for both iMessage and SMS)
-      if (!this.shouldProcessMessage(eventData.data)) {
+      // Processing includes: analysis, AI responses, task extraction, etc.
+      // Storage happens above regardless of this filter
+      const shouldProcess = this.shouldProcessMessage(eventData.data);
+      
+      if (!shouldProcess) {
         const chatHandles = eventData.data.chat_handles || [];
         // Use same parsing logic as shouldProcessMessage
         const allParticipants = [eventData.data.from_phone];
@@ -304,29 +340,21 @@ class KafkaEventConsumer {
           if (phone) allParticipants.push(phone);
         });
         
-        console.log(`⚠️  Skipping message ${eventData.data.id} - doesn't match filter criteria`);
+        console.log(`⚠️  Message ${eventData.data.id} stored but won't be processed - doesn't match filter criteria`);
         console.log(`  Chat ID: ${eventData.data.chat_id}, From: ${eventData.data.from_phone}`);
         console.log(`  All participants in chat: ${allParticipants.filter(p => p).join(', ')}`);
         console.log(`  Target phones: ${this.targetPhoneNumbers.join(', ') || 'none'}, Target chat: ${this.targetChatId || 'none'}`);
-        console.log(`  ⚠️  NOTE: This only affects message processing in THIS system. Actual message delivery is handled by Series API.`);
-        return;
-      }
-
-      // Skip if message ID already processed (check MongoDB)
-      const isMessageProcessed = await this.db.isMessageProcessed(eventData.data.id);
-      if (isMessageProcessed || this.processedMessageIds.has(eventData.data.id)) {
-        console.log(`   ⏭️  Message ${eventData.data.id} already processed - skipping`);
-        console.log(`      MongoDB check: ${isMessageProcessed}, In-memory cache: ${this.processedMessageIds.has(eventData.data.id)}`);
-        console.log(`      Message text: "${eventData.data.text}"`);
-        console.log(`      From: ${eventData.data.from_phone}`);
+        console.log(`  ✅ Message was stored for logging/recommendations, but won't trigger AI responses or analysis`);
+        
+        // Mark as processed (stored but not processed)
         await this.db.markEventProcessed(eventData.event_id);
+        await this.db.markMessageProcessed(normalizedMessage.messageId);
         this.processedEventIds.add(eventData.event_id);
+        this.processedMessageIds.add(normalizedMessage.messageId);
         return;
       }
 
-      // Normalize message
-      const normalizedMessage = this.normalizeMessage(eventData);
-      
+      // Message passed filter - proceed with processing
       console.log(`\n✅✅✅ MESSAGE PASSED FILTER - PROCESSING NOW ✅✅✅`);
       console.log(`   Message ID: ${normalizedMessage.messageId}`);
       console.log(`   Chat ID: ${normalizedMessage.chatId}`);
@@ -334,22 +362,9 @@ class KafkaEventConsumer {
       console.log(`   Text: "${normalizedMessage.text}"`);
       console.log(`   Sent At: ${normalizedMessage.sentAt}`);
       console.log(`\n`);
-      
-      // Store message immediately
-      if (this.onMessageStoredCallback) {
-        try {
-          console.log(`💾 Calling storage callback for message ${normalizedMessage.messageId}...`);
-          await this.onMessageStoredCallback(normalizedMessage);
-          console.log(`✅ Storage callback completed for message ${normalizedMessage.messageId}`);
-        } catch (error) {
-          console.error(`❌ Error in storage callback:`, error);
-          console.error(`   Error stack:`, error.stack);
-        }
-      } else {
-        console.warn(`⚠️  ⚠️  ⚠️  NO onMessageStoredCallback SET! Message won't be stored! ⚠️  ⚠️  ⚠️`);
-      }
 
       // Send to processor via callback (in-memory, no Kafka topic needed)
+      // This triggers: analysis, AI responses, task extraction, etc.
       if (this.onMessageCallback) {
         try {
           console.log(`📤 Calling processor callback for message ${normalizedMessage.messageId}...`);
