@@ -6,11 +6,13 @@ const GoogleSearchService = require('./google-search-service');
 const DatabaseService = require('./database-service');
 
 class TaskSchedulerService {
-  constructor() {
+  constructor(googleSearchService = null) {
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
     this.db = new DatabaseService();
-    this.googleSearchService = new GoogleSearchService();
+    // Use shared Google Search Service instance (or create new one if not provided)
+    // This ensures all services share the same rate limiting state
+    this.googleSearchService = googleSearchService || new GoogleSearchService();
     
     // Task check interval (check every minute)
     this.checkInterval = (config.taskSchedulerCheckIntervalSeconds || 60) * 1000;

@@ -12,7 +12,7 @@ const DatabaseService = require('./database-service');
 const TaskAnalyzerService = require('./task-analyzer-service');
 
 class AIResponseService {
-  constructor(targetChatId = null) {
+  constructor(targetChatId = null, googleSearchService = null) {
     if (!process.env.OPENAI_API_MY_KEY) {
       throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
@@ -37,7 +37,9 @@ class AIResponseService {
     
     // Initialize trigger detector and Google search service
     this.triggerDetector = new TriggerDetector();
-    this.googleSearchService = new GoogleSearchService();
+    // Use shared Google Search Service instance (or create new one if not provided)
+    // This ensures all services share the same rate limiting state
+    this.googleSearchService = googleSearchService || new GoogleSearchService();
     this.storageService = new StorageService();
     this.db = new DatabaseService();
     this.taskAnalyzer = null; // Will be set from index.js
@@ -56,6 +58,11 @@ class AIResponseService {
     this.lastTaskNotificationTime = new Map(); // chatId -> timestamp
     this.taskNotificationCooldown = 60 * 60 * 1000; // 1 hour cooldown between task notifications
     this.sentTaskNotifications = new Map(); // chatId -> Set of task IDs that were notified
+    
+    // Track startup time to prevent task notifications during first 90 seconds
+    // This ensures conversation initiator message is sent first
+    this.startupTime = Date.now();
+    this.taskNotificationStartupDelay = 90 * 1000; // 90 seconds delay after startup
     
     // Load conversation history from storage
     this.loadConversationHistory();
@@ -767,13 +774,21 @@ IMPORTANT:
       // 1. Tasks were actually created and stored
       // 2. There are new tasks (not duplicates)
       // 3. We haven't sent a task notification recently (cooldown)
+      // 4. At least 90 seconds have passed since startup (to let conversation initiator go first)
       const chatId = String(message.chatId);
       const lastNotificationTime = this.lastTaskNotificationTime.get(chatId) || 0;
       const now = Date.now();
       const timeSinceLastNotification = now - lastNotificationTime;
+      const timeSinceStartup = now - this.startupTime;
       
       if (newTasks.length > 0 && this.apiClient.enabled) {
-        if (timeSinceLastNotification < this.taskNotificationCooldown) {
+        // Check startup delay first - prevent task notifications during first 90 seconds
+        if (timeSinceStartup < this.taskNotificationStartupDelay) {
+          const secondsRemaining = Math.ceil((this.taskNotificationStartupDelay - timeSinceStartup) / 1000);
+          console.log(`   ⏸️  Skipping task notification - startup delay active (${secondsRemaining} seconds remaining)`);
+          console.log(`   ℹ️  ${newTasks.length} new task(s) created but notification suppressed to let conversation initiator go first`);
+          console.log(`   💡 Task notification will be sent after conversation initiator message (90 seconds after startup)`);
+        } else if (timeSinceLastNotification < this.taskNotificationCooldown) {
           const minutesRemaining = Math.ceil((this.taskNotificationCooldown - timeSinceLastNotification) / (60 * 1000));
           console.log(`   ⏸️  Skipping task notification - cooldown active (${minutesRemaining} minutes remaining)`);
           console.log(`   ℹ️  ${newTasks.length} new task(s) created but notification suppressed due to cooldown`);
@@ -874,32 +889,88 @@ IMPORTANT:
     }
   }
 
+  /**
+   * Generate a natural task notification message using LLM
+   */
+  async generateTaskNotificationMessage(message, tasks, conversationContext) {
+    try {
+      // Build task information for the prompt
+      const tasksInfo = tasks.map((task, idx) => {
+        const scheduleInfo = this.formatScheduleInfo(task);
+        return `${idx + 1}. ${task.title} (${task.category}) - ${scheduleInfo}`;
+      }).join('\n');
+
+      const systemPrompt = `You are a friendly, helpful person. The commonality between you and the other person is that you are both founders and investors. This is your primary connection point.
+
+You've just identified some tasks or goals from the conversation. Generate a natural, friendly message to acknowledge that you're tracking these tasks and will remind them.
+
+CRITICAL: Keep the message VERY SHORT - 1 sentence is ideal, maximum 2 sentences. Be brief and conversational like texting a friend. Don't write long messages.
+
+IMPORTANT:
+- Be natural and friendly, not robotic
+- Reference the conversation context if relevant
+- Use emojis sparingly (maybe 1 if appropriate)
+- Show that you understand what they want to track
+- Keep it casual and warm`;
+
+      // Get recent conversation context (last 3-5 messages)
+      const recentContext = conversationContext.slice(-5);
+      const contextText = recentContext.length > 0
+        ? `\n\nRecent conversation:\n${recentContext.map((msg, idx) => {
+            const role = msg.role === 'assistant' ? 'You' : 'Them';
+            return `${role}: ${msg.content}`;
+          }).join('\n')}`
+        : '';
+
+      const userPrompt = `Generate a friendly, brief message acknowledging that you're tracking these tasks:
+
+${tasksInfo}${contextText}
+
+Generate a natural, short message (1-2 sentences max) to let them know you're tracking these tasks and will remind them. Be friendly and conversational.`;
+
+      console.log(`💭 Generating task notification message using LLM...`);
+      console.log(`   Tasks: ${tasks.length}`);
+      console.log(`   Using ${recentContext.length} messages for context`);
+
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.8,
+        max_tokens: 100 // Keep it short
+      });
+
+      const generatedText = response.choices[0].message.content.trim();
+      console.log(`✅ Generated task notification: "${generatedText}"`);
+      return generatedText;
+    } catch (error) {
+      console.error('Error generating task notification message with LLM:', error);
+      throw error;
+    }
+  }
+
   async sendTaskNotification(message, tasks) {
     try {
-      // If multiple tasks, batch them into a single concise message
-      // Build a simple, short notification
-      let notificationText = '';
+      // Get conversation context for LLM generation
+      const context = await this.getConversationContext(message.chatId, 10, false);
       
-      if (tasks.length === 1) {
-        // Single task - very short message
-        const task = tasks[0];
-        const scheduleInfo = this.formatScheduleInfo(task);
-        if (task.category === 'sports' && task.metadata?.teamName) {
-          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 🏆`;
-        } else if (task.category === 'goal') {
-          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 💪`;
-        } else if (task.category === 'event') {
-          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 📅`;
-        } else {
+      // Generate natural message using LLM
+      let notificationText;
+      try {
+        notificationText = await this.generateTaskNotificationMessage(message, tasks, context);
+      } catch (llmError) {
+        console.warn('⚠️  LLM generation failed, using fallback message:', llmError.message);
+        // Fallback to simple message if LLM fails
+        if (tasks.length === 1) {
+          const task = tasks[0];
+          const scheduleInfo = this.formatScheduleInfo(task);
           notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 👍`;
+        } else {
+          notificationText = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
         }
-      } else {
-        // Multiple tasks - very short batched message
-        notificationText = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
       }
-
-      // Use the simple notification text we built above
-      // No need for LLM generation - keep it simple and consistent
 
       console.log(`📤 Sending task creation notification to chat ${message.chatId}...`);
       console.log(`   Generated message: "${notificationText}"`);

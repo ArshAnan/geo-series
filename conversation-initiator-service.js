@@ -7,7 +7,7 @@ const GoogleSearchService = require('./google-search-service');
 const DatabaseService = require('./database-service');
 
 class ConversationInitiatorService {
-  constructor(targetChatId = null) {
+  constructor(targetChatId = null, googleSearchService = null) {
     if (!process.env.OPENAI_API_MY_KEY) {
       throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
@@ -38,10 +38,12 @@ class ConversationInitiatorService {
     // Interval timer
     this.checkIntervalId = null;
     
-    // Initialize Google Search Service for current events
-    this.googleSearchService = new GoogleSearchService();
+    // Use shared Google Search Service instance (or create new one if not provided)
+    // This ensures all services share the same rate limiting state
+    this.googleSearchService = googleSearchService || new GoogleSearchService();
     
-    // Rate limiting for Google Search API
+    // Rate limiting for Google Search API (deprecated - now handled by shared service)
+    // Keeping for backward compatibility but not used
     this.lastGoogleSearchTime = 0;
     this.googleSearchCooldown = 10 * 1000; // 10 seconds between searches
     this.googleSearchRateLimitHit = false;
@@ -662,8 +664,8 @@ I thought it would be great to connect you both! Feel free to take it from here.
    * Generate a natural conversation starter based on shared interest
    */
   async generateConversationStarter(sharedInterest, conversationHistory = [], isGroupChat = false, chatId = null) {
-    // Hardcoded message for now
-    return "looks like you guys did not connect, can you connect sometime next week?";
+    // Hardcoded message for conversation initiator
+    return "seems like you guys did not connect, let's connect";
   }
 
   /**
@@ -681,10 +683,14 @@ I thought it would be great to connect you both! Feel free to take it from here.
 
   /**
    * Check and initiate conversations for eligible chats
+   * @param {boolean} forceDemo - If true, bypass inactivity check for demo purposes
    */
-  async checkAndInitiate() {
+  async checkAndInitiate(forceDemo = false) {
     try {
       console.log('\n🔔 Conversation Initiator: Checking for opportunities to start conversations...');
+      if (forceDemo) {
+        console.log('   🎬 DEMO MODE: Bypassing inactivity check - will send message regardless of last message time');
+      }
       
       // Only check the target chat ID if configured
       if (!this.targetChatId) {
@@ -714,29 +720,34 @@ I thought it would be great to connect you both! Feel free to take it from here.
           
           // No daily limit - allow unlimited initiations as long as inactivity threshold is met
           
-          // Check if chat is inactive
+          // Check if chat is inactive (skip this check in demo mode)
           const chatMessages = conversations.filter(msg => msg.chatId === chatId);
           const isInactive = this.isChatInactive(chatId, conversations);
           
-          // If no messages from API but we have a target chat ID, treat as inactive (allow initial message)
-          if (!isInactive && chatMessages.length === 0 && this.targetChatId && String(chatId) === String(this.targetChatId)) {
-            console.log(`   ✅ Chat ${chatId}: No messages found from API yet, will send initial message`);
-          } else if (!isInactive) {
-            const sortedMessages = chatMessages
-              .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
-            if (sortedMessages.length > 0) {
-              const lastMessage = sortedMessages[0];
-              const lastMessageTime = new Date(lastMessage.sentAt).getTime();
-              const now = Date.now();
-              const inactivityMinutes = (now - lastMessageTime) / (1000 * 60);
-              console.log(`   ⏭️  Chat ${chatId}: Chat is still active (last message ${inactivityMinutes.toFixed(1)} minutes ago, need ${this.minInactivityMinutes} minutes)`);
-            } else {
-              console.log(`   ⏭️  Chat ${chatId}: No messages found`);
+          // In demo mode, skip inactivity check and proceed
+          if (forceDemo) {
+            console.log(`   🎬 DEMO MODE: Skipping inactivity check - proceeding to send message`);
+          } else {
+            // If no messages from API but we have a target chat ID, treat as inactive (allow initial message)
+            if (!isInactive && chatMessages.length === 0 && this.targetChatId && String(chatId) === String(this.targetChatId)) {
+              console.log(`   ✅ Chat ${chatId}: No messages found from API yet, will send initial message`);
+            } else if (!isInactive) {
+              const sortedMessages = chatMessages
+                .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+              if (sortedMessages.length > 0) {
+                const lastMessage = sortedMessages[0];
+                const lastMessageTime = new Date(lastMessage.sentAt).getTime();
+                const now = Date.now();
+                const inactivityMinutes = (now - lastMessageTime) / (1000 * 60);
+                console.log(`   ⏭️  Chat ${chatId}: Chat is still active (last message ${inactivityMinutes.toFixed(1)} minutes ago, need ${this.minInactivityMinutes} minutes)`);
+              } else {
+                console.log(`   ⏭️  Chat ${chatId}: No messages found`);
+              }
+              continue;
             }
-            continue;
+            
+            console.log(`   ✅ Chat ${chatId}: Inactive for ${this.minInactivityMinutes}+ minutes`);
           }
-          
-          console.log(`   ✅ Chat ${chatId}: Inactive for ${this.minInactivityMinutes}+ minutes`);
           
           // Check if introduction has been sent (check if agent has sent the introduction message specifically)
           const hasIntroductionBeenSent = await this.hasIntroductionBeenSent(chatId);
@@ -851,11 +862,16 @@ I thought it would be great to connect you both! Feel free to take it from here.
           // Check if we've already initiated about this specific interest recently (within last hour)
           // This prevents spamming the same interest, but allows different interests
           // TEMPORARILY REDUCED TO 5 MINUTES FOR TESTING
-          const recentlyInitiated = await this.hasRecentlyInitiated(chatId, interest.description, 5); // 5 minutes (reduced from 60 for testing)
-          if (recentlyInitiated) {
-            console.log(`   ⏭️  Chat ${chatId}: Already initiated about this interest recently (within last 5 minutes)`);
-            console.log(`   💡 To allow more frequent initiations, reduce the cooldown period or clear initiation records in MongoDB`);
-            continue;
+          // Skip this check in demo mode
+          if (!forceDemo) {
+            const recentlyInitiated = await this.hasRecentlyInitiated(chatId, interest.description, 5); // 5 minutes (reduced from 60 for testing)
+            if (recentlyInitiated) {
+              console.log(`   ⏭️  Chat ${chatId}: Already initiated about this interest recently (within last 5 minutes)`);
+              console.log(`   💡 To allow more frequent initiations, reduce the cooldown period or clear initiation records in MongoDB`);
+              continue;
+            }
+          } else {
+            console.log(`   🎬 DEMO MODE: Skipping "recently initiated" check for interest`);
           }
             
             // Generate conversation starter based on shared interest with conversation history
@@ -865,11 +881,15 @@ I thought it would be great to connect you both! Feel free to take it from here.
             interestDescription = interest.description;
           } else {
             // No shared interests - use generic starter with conversation history
-            // Check if we've sent a generic starter recently
-            const recentlyInitiatedGeneric = await this.hasRecentlyInitiated(chatId, 'generic_starter', 5); // 5 minutes
-            if (recentlyInitiatedGeneric) {
-              console.log(`   ⏭️  Chat ${chatId}: Already sent generic starter recently (within last 5 minutes)`);
-              continue;
+            // Check if we've sent a generic starter recently (skip in demo mode)
+            if (!forceDemo) {
+              const recentlyInitiatedGeneric = await this.hasRecentlyInitiated(chatId, 'generic_starter', 5); // 5 minutes
+              if (recentlyInitiatedGeneric) {
+                console.log(`   ⏭️  Chat ${chatId}: Already sent generic starter recently (within last 5 minutes)`);
+                continue;
+              }
+            } else {
+              console.log(`   🎬 DEMO MODE: Skipping "recently initiated" check for generic starter`);
             }
             console.log(`   💭 No shared interests found for chat ${chatId}, using generic conversation starter...`);
             messageText = await this.generateGenericConversationStarter(conversationHistory, isGroupChat);
@@ -974,6 +994,17 @@ I thought it would be great to connect you both! Feel free to take it from here.
     this.sendIntroductionIfNeeded().catch(error => {
       console.error('Error sending introduction message on startup:', error);
     });
+    
+    // Auto-trigger conversation initiator after 90 seconds for demo purposes
+    // This bypasses the inactivity check to ensure message is sent for demo
+    console.log('   ⏰ Auto-triggering conversation initiator after 90 seconds (demo mode)...');
+    console.log('   🎬 DEMO MODE: Will bypass inactivity check and send message after 90 seconds');
+    setTimeout(() => {
+      console.log('   🚀 Auto-trigger: Running conversation initiator check now (DEMO MODE - bypassing inactivity)...');
+      this.checkAndInitiate(true).catch(error => {
+        console.error('Error in auto-triggered conversation initiator check:', error);
+      });
+    }, 90 * 1000); // 90 seconds
     
     // Set up periodic checks (conversation starters will only trigger after minInactivityMinutes)
     this.checkIntervalId = setInterval(() => {

@@ -121,20 +121,27 @@ class ConversationLogger {
       // Initialize chat
       const chatId = await this.initializeChat();
 
-      // Initialize services
+      // Create a SINGLE shared GoogleSearchService instance
+      // This ensures all services share the same rate limiting state and prevents
+      // multiple services from making concurrent requests that cause rate limits
+      const GoogleSearchService = require('./google-search-service');
+      const sharedGoogleSearchService = new GoogleSearchService();
+      console.log('✅ Created shared GoogleSearchService instance (all services will use this to prevent rate limits)');
+      
+      // Initialize services (pass shared GoogleSearchService to all that need it)
       this.eventConsumer = new KafkaEventConsumer(chatId, config.targetPhoneNumbers || []);
       this.messageProcessor = new MessageProcessor();
       this.openaiAnalyzer = new OpenAIAnalyzer(chatId);
       this.storageService = new StorageService();
       this.notificationService = new NotificationService();
       this.taskAnalyzerService = new TaskAnalyzerService(chatId);
-      this.taskSchedulerService = new TaskSchedulerService();
-      this.aiResponseService = new AIResponseService(chatId);
+      this.taskSchedulerService = new TaskSchedulerService(sharedGoogleSearchService);
+      this.aiResponseService = new AIResponseService(chatId, sharedGoogleSearchService);
       // Set task analyzer reference in AI response service for task creation
       this.aiResponseService.taskAnalyzer = this.taskAnalyzerService;
       // Set AI response service reference in task analyzer for sending notifications
       this.taskAnalyzerService.aiResponseService = this.aiResponseService;
-      this.conversationInitiatorService = new ConversationInitiatorService(chatId);
+      this.conversationInitiatorService = new ConversationInitiatorService(chatId, sharedGoogleSearchService);
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
       console.log('🔗 Setting up callbacks...');

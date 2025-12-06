@@ -8,7 +8,7 @@
   "conversationInactivityMinutes": 30,
   "notificationPhoneNumber": null,
   "conversationInitiatorIntervalMinutes": 2,
-  "conversationInitiatorMinInactivityMinutes": 2,
+  "conversationInitiatorMinInactivityMinutes": 0.5,
   "conversationInitiatorMaxFrequency": 1,
   "taskSchedulerCheckIntervalSeconds": 60,
   "taskReminderTimeWindowMinutes": 5,
