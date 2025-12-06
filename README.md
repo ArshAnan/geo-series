@@ -42,7 +42,7 @@ SERIES_API_BASE_URL=https://api.example.com
 SERIES_API_KEY=your-api-key
 
 # OpenAI Configuration
-OPENAI_API_KEY=your-openai-api-key
+OPENAI_API_MY_KEY=your-openai-api-key
 
 # Google Custom Search API Configuration (for restaurant/place recommendations)
 # Get your API key from: https://console.cloud.google.com/
@@ -344,7 +344,7 @@ Agent: "Hey! I was just thinking about Attack on Titan. Have you seen the latest
 
 ### Requirements
 
-- Requires `OPENAI_API_KEY` to generate conversation starters
+- Requires `OPENAI_API_MY_KEY` to generate conversation starters
 - Requires `SERIES_API_BASE_URL` and `SERIES_API_KEY` to send messages
 - Requires existing key moments with shared interests (extracted from previous conversations)
 - **Optional**: `GOOGLE_CUSTOM_SEARCH_API_KEY` and `GOOGLE_CUSTOM_SEARCH_ENGINE_ID` (or `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`) for current events integration (sports games, live events, etc.). If not configured, the system will still generate starters with current date context but won't fetch live game scores/events.
@@ -397,7 +397,7 @@ node check-status.js
 
 ### No key moments extracted
 
-- Verify `OPENAI_API_KEY` is set correctly
+- Verify `OPENAI_API_MY_KEY` is set correctly
 - Check that `minMessagesForAnalysis` threshold is met (default: 3 messages)
 - Review OpenAI API usage/quota
 - Check that the batching window has elapsed (default: 15 seconds)
@@ -424,7 +424,7 @@ node check-status.js
 
 ### Conversation initiations not happening
 
-- Verify `OPENAI_API_KEY` is set correctly
+- Verify `OPENAI_API_MY_KEY` is set correctly
 - Check that shared interests have been extracted (look in `logs/key-moments.json` for `type: "shared_interest"`)
 - Ensure chats have been inactive for the configured minimum period (`conversationInitiatorMinInactivityMinutes`)
 - Check that the maximum frequency hasn't been reached (default: 1 per day per chat)

@@ -447,5 +447,143 @@
     "eventType": "message.received",
     "createdAt": "2025-12-06T02:19:26-06:00",
     "storedAt": "2025-12-06T08:19:26.530Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53687898",
+    "fromPhone": "+12014927091",
+    "text": "Hey are you interested in fc Barcelona match?",
+    "sentAt": "2025-12-06 02:49:06 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "6a155d37-150b-40ad-93af-b6e0d2efc970",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:49:13-06:00",
+    "storedAt": "2025-12-06T08:49:13.340Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "ai-response-1765010955644-4z9am0qy7",
+    "fromPhone": "+16463458837",
+    "text": "🍽️ Here are some restaurant recommendations for \"Indian restaurant in NYC\" (based on your preference for indian food) in fc Barcelona match:\n\n1. **INDN: Premium Cocktails & Small Plates | Luxury Indian Restaurant ...**\n   📍 www.indnnyc.com\n   NYC is getting its first all-Indian cocktail bar, with butter chicken-inspired drinks · NY's first a...\n\n2. **Best Indian restaurants in Midtown or Lower Manhattan? : r/FoodNYC**\n   📍 www.reddit.com\n   Aug 21, 2023 ... These are some of my favorites Dhaba, Hot breads, Rajbhog, Dosa house, Dimple's Bom...\n\n3. **NYC Indian MICHELIN Restaurants – the MICHELIN Guide**\n   📍 guide.michelin.com\n   NYC and surroundings: 1-14 of 14 restaurants · Tamarind · Dhamaka · Bungalow · Adda · Semma · Ishq ·...\n\n4. **People who regularly eat Indian food, what Indian restaurants do ...**\n   📍 When I first moved to ny\n   May 5, 2024 ... 157 votes, 150 comments. On the cheap and casual end, I've been a fan of haandi for ...\n\n5. **Best Indian Restaurants in NYC | Eater NY**\n   📍 The Best Indian Restaurants in NY\n   Oct 23, 2025 ... The Best Indian Restaurants in NYC · Baazi · Jaz Indian Cuisine · Javitri · Hyderab...\n\nHope you find something great! 🎉",
+    "sentAt": "2025-12-06T08:49:15.644Z",
+    "chatHandles": [],
+    "attachments": [],
+    "isRead": false,
+    "service": "AI",
+    "eventType": "message.sent",
+    "createdAt": "2025-12-06T08:49:15.644Z",
+    "storedAt": "2025-12-06T08:49:15.645Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53689764",
+    "fromPhone": "+19294265300",
+    "text": "Me too kinda! Ronaldo was really impressive in that team. But, he left",
+    "sentAt": "2025-12-06 02:54:10 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "5b5b1eda-3c00-46fa-90cd-76a9c9944d01",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:54:11-06:00",
+    "storedAt": "2025-12-06T08:54:12.107Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53691816",
+    "fromPhone": "+12014927091",
+    "text": "I am a real madrid fan",
+    "sentAt": "2025-12-06 02:58:46 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "93e11960-d06f-400f-b649-6b0b8bcd2ee1",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T02:58:47-06:00",
+    "storedAt": "2025-12-06T08:58:47.927Z"
+  },
+  {
+    "chatId": "1702657",
+    "messageId": "53693846",
+    "fromPhone": "+12014927091",
+    "text": "I am planning to loose a little weight",
+    "sentAt": "2025-12-06 03:02:49 -0600",
+    "chatHandles": [
+      {
+        "display_name": "You",
+        "identifier": "+16463458837",
+        "is_me": true
+      },
+      {
+        "display_name": "+1 (929) 426-5300",
+        "identifier": "+19294265300",
+        "is_me": false
+      },
+      {
+        "display_name": "+1 (201) 492-7091",
+        "identifier": "+12014927091",
+        "is_me": false
+      }
+    ],
+    "attachments": [],
+    "isRead": false,
+    "service": "RCS",
+    "eventId": "8702e9c0-7f6e-4e13-bdde-bdbfd71991b0",
+    "eventType": "message.received",
+    "createdAt": "2025-12-06T03:02:51-06:00",
+    "storedAt": "2025-12-06T09:02:51.247Z"
   }
 ]

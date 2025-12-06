@@ -59,9 +59,9 @@ async function testNotifications() {
         }
 
         // Add moments to activity so sendSummaryNow can use them
-        momentsToSend.forEach(moment => {
-          notificationService.addKeyMoment(moment);
-        });
+        for (const moment of momentsToSend) {
+          await notificationService.addKeyMoment(moment);
+        }
 
         console.log(`\n📤 Sending summary for chat ${chatId}...\n`);
         await notificationService.sendSummaryNow(chatId);

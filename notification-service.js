@@ -1,9 +1,8 @@
 // Notification Service - Sends key moments to users after conversations
 require('dotenv').config();
 const SeriesAPIClient = require('./api-client');
-const fs = require('fs-extra');
-const path = require('path');
 const config = require('./config.json');
+const DatabaseService = require('./database-service');
 
 class NotificationService {
   constructor() {
@@ -11,36 +10,26 @@ class NotificationService {
     this.conversationActivity = new Map(); // chatId -> { lastMessageTime, timer, keyMoments }
     this.inactivityTimeout = (config.conversationInactivityMinutes || 30) * 60 * 1000; // Default 30 minutes
     this.onKeyMomentCallback = null;
-    this.sentMomentIds = new Set(); // Track which moments we've already sent
-    this.sentMomentsFile = path.join(__dirname, 'logs', 'sent-moments.json');
+    this.sentMomentIds = new Set(); // Track which moments we've already sent (in-memory cache)
+    this.db = new DatabaseService();
+    this.sendingSummaries = new Set(); // Track chats that are currently sending summaries to prevent duplicates
     
-    // Load sent moments from file
-    this.loadSentMoments();
+    // Note: MongoDB connection will happen in start() method
   }
 
   async loadSentMoments() {
     try {
-      if (await fs.pathExists(this.sentMomentsFile)) {
-        const data = await fs.readJson(this.sentMomentsFile);
-        this.sentMomentIds = new Set(data.sentMomentIds || []);
-        if (this.sentMomentIds.size > 0) {
-          console.log(`Loaded ${this.sentMomentIds.size} sent moment IDs`);
-        }
-      }
+      // Load from MongoDB and cache in memory
+      await this.db.connect();
+      // Note: We'll check MongoDB directly in isMomentSent, this is just for initial cache
     } catch (error) {
       console.warn('Could not load sent moments:', error.message);
     }
   }
 
   async saveSentMoments() {
-    try {
-      await fs.ensureDir(path.dirname(this.sentMomentsFile));
-      await fs.writeJson(this.sentMomentsFile, {
-        sentMomentIds: Array.from(this.sentMomentIds)
-      }, { spaces: 2 });
-    } catch (error) {
-      console.warn('Could not save sent moments:', error.message);
-    }
+    // No longer needed - MongoDB handles persistence
+    // This method kept for compatibility but does nothing
   }
 
   setCallback(onKeyMoment) {
@@ -78,7 +67,7 @@ class NotificationService {
   /**
    * Add a key moment to a conversation
    */
-  addKeyMoment(moment) {
+  async addKeyMoment(moment) {
     const chatId = moment.chatId;
     
     if (!this.conversationActivity.has(chatId)) {
@@ -94,8 +83,9 @@ class NotificationService {
     // Create a unique ID for this moment
     const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
     
-    // Check if we've already sent this moment
-    if (this.sentMomentIds.has(momentId)) {
+    // Check if we've already sent this moment (check MongoDB)
+    const isSent = await this.db.isMomentSent(momentId);
+    if (isSent) {
       console.log(`Skipping already sent moment: ${moment.description}`);
       return;
     }
@@ -111,10 +101,17 @@ class NotificationService {
 
   /**
    * Send conversation summary to user
-   * Loads ALL key moments from storage for this chat and sends them
+   * Only sends UNSENT key moments in a single message
    */
   async sendConversationSummary(chatId) {
+    // Prevent concurrent sends for the same chat
+    if (this.sendingSummaries.has(chatId)) {
+      console.log(`⏭️  Summary already being sent for chat ${chatId}, skipping duplicate`);
+      return;
+    }
+
     try {
+      this.sendingSummaries.add(chatId);
       console.log(`📋 Preparing to send conversation summary for chat ${chatId}...`);
       
       // Load ALL key moments from storage for this chat
@@ -125,11 +122,31 @@ class NotificationService {
         return;
       }
 
-      console.log(`📊 Found ${allMomentsFromStorage.length} key moments in storage for chat ${chatId}`);
+      // Filter to only UNSENT moments
+      const unsentMoments = [];
+      for (const moment of allMomentsFromStorage) {
+        const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
+        const isSent = await this.db.isMomentSent(momentId);
+        if (!isSent) {
+          unsentMoments.push(moment);
+        }
+      }
 
-      // Send ALL moments from conversation history (not just new ones)
-      // This ensures the user sees the complete picture of their conversation
-      const summary = this.formatSummary(allMomentsFromStorage, chatId);
+      if (unsentMoments.length === 0) {
+        console.log(`ℹ️  All key moments for chat ${chatId} have already been sent`);
+        return;
+      }
+
+      console.log(`📊 Found ${unsentMoments.length} unsent key moment(s) out of ${allMomentsFromStorage.length} total for chat ${chatId}`);
+
+      // Send only UNSENT moments in a single message
+      const summary = this.formatSummary(unsentMoments, chatId);
+      
+      // Only send if there are major moments to share
+      if (!summary) {
+        console.log(`   ℹ️  No major moments to share (filtered out trivial moments)`);
+        return;
+      }
       
       // Send to user via API
       if (this.apiClient.enabled) {
@@ -140,72 +157,113 @@ class NotificationService {
         console.log(summary);
       }
 
-      // Mark all moments as sent to avoid duplicate notifications
-      allMomentsFromStorage.forEach(moment => {
+      // Mark only the unsent moments as sent to avoid duplicate notifications
+      for (const moment of unsentMoments) {
         const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-        this.sentMomentIds.add(momentId);
-      });
+        await this.db.markMomentSent(momentId, chatId);
+        this.sentMomentIds.add(momentId); // Cache in memory too
+      }
 
-      await this.saveSentMoments();
-
-      console.log(`✅ Sent all ${allMomentsFromStorage.length} key moments from conversation history to user for chat ${chatId}`);
+      console.log(`✅ Sent ${unsentMoments.length} key moment(s) to user for chat ${chatId} in a single message`);
     } catch (error) {
       console.error(`❌ Error sending conversation summary for chat ${chatId}:`, error);
       console.error(error.stack);
+    } finally {
+      // Remove from sending set after a short delay to prevent rapid re-sends
+      setTimeout(() => {
+        this.sendingSummaries.delete(chatId);
+      }, 5000); // 5 second cooldown
     }
   }
 
   /**
    * Format key moments into a readable summary
+   * Show major moments with day/time and actual messages to make it personal
    */
   formatSummary(moments, chatId) {
     if (!moments || moments.length === 0) {
-      return `📝 Key Moments from Your Conversation\n\nNo key moments have been detected yet.`;
+      return null; // Don't send if no moments
     }
 
-    const momentTypeLabels = {
-      'first_contact': '👋 First Connection',
-      'shared_interest': '🎯 Shared Interest',
-      'important_date': '📅 Important Date',
-      'milestone': '⭐ Milestone',
-      'preference': '💭 Preference'
-    };
+    // Filter to only major moments (higher confidence, important types)
+    // Focus on milestones, shared interests, important dates - skip trivial preferences
+    const majorMoments = moments
+      .filter(moment => {
+        if (!moment || !moment.type) return false;
+        // Only include major moment types
+        const majorTypes = ['milestone', 'shared_interest', 'important_date', 'first_contact'];
+        if (!majorTypes.includes(moment.type)) return false;
+        // Require higher confidence for major moments (0.5+)
+        const confidence = moment.confidence || 0.3;
+        return confidence >= 0.5;
+      })
+      .sort((a, b) => {
+        // Sort by confidence (highest first), then by date (most recent first)
+        const confDiff = (b.confidence || 0.3) - (a.confidence || 0.3);
+        if (confDiff !== 0) return confDiff;
+        const dateA = new Date(a.date || a.extractedAt || 0).getTime();
+        const dateB = new Date(b.date || b.extractedAt || 0).getTime();
+        return dateB - dateA;
+      })
+      .slice(0, 3); // Only show top 3 major moments
 
-    let summary = `📝 Key Moments from Your Conversation\n\n`;
-    
-    // Group by type
-    const grouped = moments.reduce((acc, moment) => {
-      if (!moment || !moment.type) {
-        return acc; // Skip invalid moments
-      }
-      if (!acc[moment.type]) {
-        acc[moment.type] = [];
-      }
-      acc[moment.type].push(moment);
-      return acc;
-    }, {});
+    if (majorMoments.length === 0) {
+      return null; // No major moments to share
+    }
 
-    // Format each group
-    Object.entries(grouped).forEach(([type, typeMoments]) => {
-      const label = momentTypeLabels[type] || type;
-      summary += `${label}:\n`;
+    // Format each moment with date/time and context
+    const formattedMoments = majorMoments.map(moment => {
+      // Format date/time in a friendly way
+      let dateTimeStr = '';
+      const momentDate = moment.date || moment.extractedAt;
+      if (momentDate) {
+        try {
+          const date = new Date(momentDate);
+          const now = new Date();
+          const daysDiff = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+          
+          if (daysDiff === 0) {
+            // Today - show time
+            dateTimeStr = `Today at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else if (daysDiff === 1) {
+            dateTimeStr = `Yesterday at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else if (daysDiff < 7) {
+            dateTimeStr = `${date.toLocaleDateString('en-US', { weekday: 'short' })} at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else {
+            dateTimeStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          }
+        } catch (e) {
+          // If date parsing fails, skip it
+        }
+      }
+
+      // Get the actual message/context to make it personal
+      const context = moment.context || '';
+      const description = moment.description || 'Something happened';
       
-      typeMoments.forEach(moment => {
-        summary += `  • ${moment.description || 'Unknown moment'}`;
-        if (moment.context) {
-          summary += `\n    "${moment.context}"`;
-        }
-        if (moment.date) {
-          summary += `\n    📅 ${moment.date}`;
-        }
-        summary += `\n`;
-      });
-      summary += `\n`;
+      // Build the moment line
+      let momentLine = description;
+      if (context && context.length > 0 && context.length < 100) {
+        // Include context if it's short and meaningful
+        momentLine += ` "${context}"`;
+      }
+      if (dateTimeStr) {
+        momentLine += ` (${dateTimeStr})`;
+      }
+      
+      return momentLine;
     });
 
-    summary += `\n💡 These moments were automatically detected from your conversation.`;
-
-    return summary;
+    // Build the message - keep it personal and concise
+    if (formattedMoments.length === 1) {
+      return `Hey! I noticed: ${formattedMoments[0]}`;
+    } else {
+      let message = `Hey! Here are some moments I noticed:\n\n`;
+      formattedMoments.forEach((moment, idx) => {
+        message += `${idx + 1}. ${moment}\n`;
+      });
+      return message.trim();
+    }
   }
 
   /**
@@ -307,14 +365,8 @@ class NotificationService {
    * Get ALL key moments from storage for a chat (regardless of sent status)
    */
   async getAllMomentsFromStorage(chatId) {
-    const keyMomentsFile = path.join(__dirname, 'logs', 'key-moments.json');
-    if (!(await fs.pathExists(keyMomentsFile))) {
-      return [];
-    }
-
     try {
-      const allMoments = await fs.readJson(keyMomentsFile);
-      const chatMoments = allMoments.filter(m => m.chatId === chatId);
+      const chatMoments = await this.db.getKeyMomentsByChat(chatId);
       
       // Sort by date
       chatMoments.sort((a, b) => {
@@ -336,28 +388,39 @@ class NotificationService {
   async getPendingMomentsFromStorage(chatId) {
     const allMoments = await this.getAllMomentsFromStorage(chatId);
     
-    return allMoments.filter(moment => {
+    const pending = [];
+    for (const moment of allMoments) {
       const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-      return !this.sentMomentIds.has(momentId);
-    });
+      const isSent = await this.db.isMomentSent(momentId);
+      if (!isSent) {
+        pending.push(moment);
+      }
+    }
+    return pending;
   }
 
   /**
    * Get all pending moments for a chat (from memory)
    */
-  getPendingMoments(chatId) {
+  async getPendingMoments(chatId) {
     const activity = this.conversationActivity.get(chatId);
     if (!activity) {
       return [];
     }
     
-    return activity.keyMoments.filter(moment => {
+    const pending = [];
+    for (const moment of activity.keyMoments) {
       const momentId = `${chatId}-${moment.type}-${moment.date}-${moment.description.substring(0, 50)}`;
-      return !this.sentMomentIds.has(momentId);
-    });
+      const isSent = await this.db.isMomentSent(momentId);
+      if (!isSent) {
+        pending.push(moment);
+      }
+    }
+    return pending;
   }
 
   async start() {
+    await this.db.connect();
     console.log('Notification service started');
     console.log(`Inactivity timeout: ${config.conversationInactivityMinutes || 30} minutes`);
     console.log(`API client enabled: ${this.apiClient.enabled}`);

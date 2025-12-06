@@ -5,12 +5,12 @@ const config = require('./config.json');
 
 class TriggerDetector {
   constructor() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY must be set in .env');
+    if (!process.env.OPENAI_API_MY_KEY) {
+      throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
 
     this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: process.env.OPENAI_API_MY_KEY
     });
 
     this.model = config.openaiModel || 'gpt-4o';
@@ -30,8 +30,8 @@ class TriggerDetector {
    */
   async detectTriggers(conversationHistory, recentMessage, pastRecommendations = []) {
     try {
-      // Use more conversation history (last 50 messages) to better understand context and preferences
-      const recentHistory = conversationHistory.slice(-50);
+      // Use minimal conversation history to save tokens (last 10 messages, reduced from 50)
+      const recentHistory = conversationHistory.slice(-10);
       const conversationText = recentHistory.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -52,47 +52,63 @@ class TriggerDetector {
 - Past recommendations sent: ${pastRecsText}
 
 Use this preference context to make better, more personalized recommendations. Avoid repeating past recommendations unless the user explicitly asks for similar places.`;
+      }
 
-      // Add the current message
-      const fullContext = conversationText + `\nUser: ${recentMessage.text || ''}`;
+      // Focus on the NEW message - this is what we're analyzing for triggers
+      const newMessageText = recentMessage.text || '';
+      
+      // Conversation history is ONLY for context/preferences, NOT for trigger detection
+      const fullContext = conversationText.length > 0 
+        ? `Previous conversation context (for reference only):\n${conversationText}\n\n` 
+        : '';
 
-      const prompt = `Analyze this conversation and determine if the users are ACTIVELY PLANNING an activity that would benefit from NEW recommendations or search results.
+      const prompt = `Analyze the MOST RECENT message below and determine if the user is ACTIVELY ASKING for recommendations or planning an activity RIGHT NOW.
 
-IMPORTANT CONTEXT RULES:
+CRITICAL RULES:
+- **ONLY analyze the MOST RECENT message** (the last message in the conversation)
+- **DO NOT trigger based on old conversation history** - only trigger if the NEW message explicitly asks for recommendations
 - DO NOT trigger if they're just casually discussing food/restaurants without planning to go
 - DO NOT trigger if they're just mentioning preferences ("I like Indian food") without asking for recommendations
 - DO NOT trigger if they're discussing restaurants they already know about
 - DO NOT trigger if recommendations were already provided in this conversation
-- ONLY trigger if they're ACTIVELY PLANNING and ASKING for suggestions (e.g., "where should we eat?", "looking for a restaurant", "need recommendations")
-- Use the user preferences from conversation history to make BETTER, more personalized recommendations
-- If similar recommendations were sent recently, suggest DIFFERENT options or variations
+- **ONLY trigger if the NEW message contains explicit planning questions** like:
+  * "where should we eat?"
+  * "looking for a restaurant"
+  * "need recommendations"
+  * "suggest a place"
+  * "going out for dinner" (with planning intent)
+  * "where to go?"
+  * "things to do"
+  * "looking for activities"
 
-Look for ACTIVE PLANNING indicators:
-1. **Restaurant/Food planning**: Explicit questions like "where should we eat?", "looking for restaurants", "need recommendations", "suggest a place", "going out for dinner" (with planning intent)
-2. **Activity planning**: "things to do", "activities", "places to visit", "where to go", "entertainment" (with planning intent)
-3. **Event planning**: "events", "concerts", "shows", "movies", "theater" (with planning intent)
+The conversation history below is ONLY for understanding user preferences (e.g., if they like Indian food), NOT for detecting triggers. The trigger must be in the NEW message itself.
+
+Look for ACTIVE PLANNING indicators in the NEW message only:
+1. **Restaurant/Food planning**: Explicit questions asking where to eat or for restaurant suggestions
+2. **Activity planning**: Questions asking what to do, where to go, activities to try
+3. **Event planning**: Questions about events, concerts, shows, movies, theater
 
 Respond with a JSON object in this exact format:
 {
   "shouldTrigger": true/false,
   "triggerType": "restaurant" | "food" | "activity" | "place" | "event" | null,
-  "searchQuery": "specific search query string enriched with user preferences" | null,
-  "location": "location mentioned if any" | null,
+  "searchQuery": "specific search query string based ONLY on the new message (use preferences from history if relevant)" | null,
+  "location": "location mentioned in the NEW message if any" | null,
   "confidence": 0.0-1.0,
-  "reasoning": "brief explanation",
+  "reasoning": "brief explanation of why this trigger was or wasn't detected based on the NEW message",
   "preferences": {
-    "cuisine": "preferred cuisine type if mentioned" | null,
-    "location": "preferred location if mentioned" | null,
-    "priceRange": "budget/preference if mentioned" | null
+    "cuisine": "preferred cuisine type if mentioned in NEW message" | null,
+    "location": "preferred location if mentioned in NEW message" | null,
+    "priceRange": "budget/preference if mentioned in NEW message" | null
   }
 }
 
-If no trigger is detected, set "shouldTrigger" to false. Be specific with search queries - extract the actual intent AND incorporate user preferences from conversation history (e.g., if they previously mentioned liking Indian food and now ask "where should we eat?", the query should be "Indian restaurant" or similar).
+If the NEW message does not explicitly ask for recommendations or planning help, set "shouldTrigger" to false. Be conservative - it's better to miss a trigger than to spam recommendations.
 
-CRITICAL: Only trigger if they're ACTIVELY ASKING for recommendations or planning to go somewhere. If they're just chatting about food preferences or discussing restaurants they know, set "shouldTrigger" to false. Be conservative - it's better to miss a trigger than to spam recommendations.
-
-Conversation:
 ${fullContext}${preferencesContext}
+
+MOST RECENT MESSAGE (this is what you're analyzing):
+User: ${newMessageText}
 
 JSON Response:`;
 
@@ -253,8 +269,8 @@ JSON Response:`;
       mentionedPlaces: []
     };
 
-    // Analyze last 100 messages for preferences
-    const historyToAnalyze = conversationHistory.slice(-100);
+    // Analyze last 20 messages for preferences (reduced from 100 to save tokens)
+    const historyToAnalyze = conversationHistory.slice(-20);
     
     // Common cuisine types
     const cuisineKeywords = [

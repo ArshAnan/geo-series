@@ -124,13 +124,17 @@ class ConversationLogger {
       // Initialize services
       this.eventConsumer = new KafkaEventConsumer(chatId, config.targetPhoneNumbers || []);
       this.messageProcessor = new MessageProcessor();
-      this.openaiAnalyzer = new OpenAIAnalyzer();
+      this.openaiAnalyzer = new OpenAIAnalyzer(chatId);
       this.storageService = new StorageService();
       this.notificationService = new NotificationService();
-      this.aiResponseService = new AIResponseService();
-      this.conversationInitiatorService = new ConversationInitiatorService();
-      this.taskAnalyzerService = new TaskAnalyzerService();
+      this.taskAnalyzerService = new TaskAnalyzerService(chatId);
       this.taskSchedulerService = new TaskSchedulerService();
+      this.aiResponseService = new AIResponseService(chatId);
+      // Set task analyzer reference in AI response service for task creation
+      this.aiResponseService.taskAnalyzer = this.taskAnalyzerService;
+      // Set AI response service reference in task analyzer for sending notifications
+      this.taskAnalyzerService.aiResponseService = this.aiResponseService;
+      this.conversationInitiatorService = new ConversationInitiatorService(chatId);
 
       // Wire up callbacks for in-memory processing (no internal Kafka topics needed)
       console.log('🔗 Setting up callbacks...');
@@ -148,24 +152,79 @@ class ConversationLogger {
         },
         // onMessageStored: store conversation immediately
         async (message) => {
-          console.log(`💾 Storage callback triggered for message ${message.messageId}`);
-          await this.storageService.storeConversation(message);
-          // Reload conversation history in AI response service to use new message for recommendations
-          // This ensures recommendations use the latest logged conversations
           try {
-            await this.aiResponseService.loadConversationHistory();
-            console.log(`🔄 Reloaded conversation history after storing new message`);
+            console.log(`💾 Storage callback triggered for message ${message.messageId}`);
+            console.log(`   Chat ID: ${message.chatId}`);
+            console.log(`   From: ${message.fromPhone}`);
+            console.log(`   Text: "${(message.text || '').substring(0, 50)}${(message.text || '').length > 50 ? '...' : ''}"`);
+            
+            await this.storageService.storeConversation(message);
+            console.log(`✅ Successfully stored message ${message.messageId} to MongoDB`);
+            
+            // Reload conversation history in AI response service to use new message for recommendations
+            // This ensures recommendations use the latest logged conversations
+            try {
+              await this.aiResponseService.loadConversationHistory();
+              console.log(`🔄 Reloaded conversation history after storing new message`);
+            } catch (error) {
+              console.warn('⚠️  Error reloading conversation history after storage:', error.message);
+              console.warn('   Stack:', error.stack);
+            }
           } catch (error) {
-            console.warn('Error reloading conversation history after storage:', error.message);
+            console.error(`❌ CRITICAL: Error in storage callback for message ${message.messageId}:`, error);
+            console.error(`   Error message: ${error.message}`);
+            console.error(`   Error stack:`, error.stack);
+            console.error(`   This message may not be logged!`);
+            // Don't throw - we want to continue processing other messages
           }
         }
       );
+      
+      // Verify callbacks are set
+      if (!this.eventConsumer.onMessageCallback) {
+        console.error('❌ CRITICAL: onMessageCallback not set!');
+      }
+      if (!this.eventConsumer.onMessageStoredCallback) {
+        console.error('❌ CRITICAL: onMessageStoredCallback not set! Messages will NOT be logged!');
+      } else {
+        console.log('✅ Message storage callback verified');
+      }
+      
       console.log('✅ Callbacks set up successfully\n');
+
+      // Track key moments extracted in current batch for task analyzer
+      const currentBatchMoments = new Map(); // chatId -> array of moments
 
       this.messageProcessor.setCallback(
         // onBatchReady: send to analyzer
         async (batch) => {
+          // Clear moments for this chat
+          currentBatchMoments.set(batch.chatId, []);
+          
+          // Process with OpenAI analyzer first
           await this.openaiAnalyzer.processBatch(batch);
+          
+          // After key moments are extracted, analyze for tasks with context
+          // Get moments extracted in this batch (plus any existing from storage)
+          const batchKeyMoments = currentBatchMoments.get(batch.chatId) || [];
+          const existingKeyMoments = await this.storageService.loadKeyMoments();
+          const chatExistingMoments = existingKeyMoments.filter(m => m.chatId === batch.chatId);
+          
+          // Combine batch moments with existing moments (avoid duplicates)
+          const allKeyMoments = [...batchKeyMoments];
+          const existingIds = new Set(batchKeyMoments.map(m => `${m.type}-${m.date}-${m.description}`));
+          chatExistingMoments.forEach(m => {
+            const id = `${m.type}-${m.date}-${m.description}`;
+            if (!existingIds.has(id)) {
+              allKeyMoments.push(m);
+            }
+          });
+          
+          // Process batch for task extraction with key moments context
+          await this.taskAnalyzerService.processBatch(batch, allKeyMoments);
+          
+          // Clean up
+          currentBatchMoments.delete(batch.chatId);
         }
       );
 
@@ -174,7 +233,13 @@ class ConversationLogger {
         async (moment) => {
           await this.storageService.storeKeyMoment(moment);
           // Add to notification service for sending to user
-          this.notificationService.addKeyMoment(moment);
+          await this.notificationService.addKeyMoment(moment);
+          
+          // Track moment for current batch (for task analyzer)
+          if (!currentBatchMoments.has(moment.chatId)) {
+            currentBatchMoments.set(moment.chatId, []);
+          }
+          currentBatchMoments.get(moment.chatId).push(moment);
         }
       );
 

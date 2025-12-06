@@ -1,1 +1,53 @@
-[]
+[
+  {
+    "category": "sports",
+    "title": "Real Madrid Matchday Reminder",
+    "description": "Send reminder before Real Madrid matches",
+    "participants": [
+      "+12014927091"
+    ],
+    "schedule": {
+      "type": "matchday",
+      "matchdayPattern": "before_match",
+      "time": "10:00"
+    },
+    "metadata": {
+      "teamName": "Real Madrid",
+      "sportType": "soccer"
+    },
+    "context": "I am a Real Madrid fan",
+    "confidence": 0.9,
+    "chatId": "1702657",
+    "id": "12345-sports-real-madrid-matchday-reminder-1765011544609",
+    "extractedAt": "2025-12-06T08:59:04.609Z",
+    "status": "active",
+    "createdAt": "2025-12-06T08:59:04.609Z",
+    "lastReminderSent": "2025-12-06T09:00:01.640Z",
+    "reminderCount": 1
+  },
+  {
+    "category": "goal",
+    "title": "Daily Weight Loss Check-in",
+    "description": "Track progress on weight loss goal",
+    "participants": [
+      "+12014927091"
+    ],
+    "schedule": {
+      "type": "daily",
+      "frequency": 1,
+      "time": "08:00"
+    },
+    "metadata": {
+      "goalType": "fitness"
+    },
+    "context": "I am planning to lose a little weight",
+    "confidence": 0.9,
+    "chatId": "1702657",
+    "id": "12345-goal-daily-weight-loss-check-in-1765011796303",
+    "extractedAt": "2025-12-06T09:03:16.303Z",
+    "status": "active",
+    "createdAt": "2025-12-06T09:03:16.303Z",
+    "lastReminderSent": null,
+    "reminderCount": 0
+  }
+]

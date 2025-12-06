@@ -1,6 +1,6 @@
 {
   "targetPhoneNumbers": ["+16463458837", "+19294265300", "+12014927091"],
-  "chatId": null,
+  "chatId": "1702657",
   "batchingWindowMinutes": 0.25,
   "openaiModel": "gpt-4o",
   "minMessagesForAnalysis": 1,

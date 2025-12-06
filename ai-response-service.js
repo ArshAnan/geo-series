@@ -8,20 +8,23 @@ const path = require('path');
 const TriggerDetector = require('./trigger-detector');
 const GoogleSearchService = require('./google-search-service');
 const StorageService = require('./storage-service');
+const DatabaseService = require('./database-service');
+const TaskAnalyzerService = require('./task-analyzer-service');
 
 class AIResponseService {
-  constructor() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY must be set in .env');
+  constructor(targetChatId = null) {
+    if (!process.env.OPENAI_API_MY_KEY) {
+      throw new Error('OPENAI_API_MY_KEY must be set in .env');
     }
 
     this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: process.env.OPENAI_API_MY_KEY
     });
 
     this.model = config.openaiModel || 'gpt-4o';
     this.apiClient = new SeriesAPIClient();
     this.senderPhoneNumber = config.senderPhoneNumber || '+16463458837';
+    this.targetChatId = targetChatId || config.chatId; // Only monitor target chat ID
     
     // Track conversation history per chat for context
     this.conversationHistory = new Map(); // chatId -> array of messages
@@ -29,10 +32,15 @@ class AIResponseService {
     // Track processed messages to avoid responding to the same message twice
     this.processedMessageIds = new Set();
     
+    // Track messages we've already reacted to (to avoid duplicate reactions)
+    this.reactedMessageIds = new Set();
+    
     // Initialize trigger detector and Google search service
     this.triggerDetector = new TriggerDetector();
     this.googleSearchService = new GoogleSearchService();
     this.storageService = new StorageService();
+    this.db = new DatabaseService();
+    this.taskAnalyzer = null; // Will be set from index.js
     
     // Track if we've sent recommendations recently to avoid spam
     this.lastRecommendationTime = new Map(); // chatId -> timestamp
@@ -41,8 +49,13 @@ class AIResponseService {
     
     // Track last response time per chat to avoid responding too frequently
     this.lastResponseTime = new Map(); // chatId -> timestamp
-    this.minResponseInterval = (config.aiResponseMinIntervalMinutes || 5) * 60 * 1000; // Minimum 5 minutes between responses (increased)
-    this.responseConfidenceThreshold = config.aiResponseConfidenceThreshold || 0.85; // Higher threshold - 0.85 (increased from 0.7)
+    this.minResponseInterval = (config.aiResponseMinIntervalMinutes || 10) * 60 * 1000; // Minimum 10 minutes between responses (increased to be less invasive)
+    this.responseConfidenceThreshold = config.aiResponseConfidenceThreshold || 0.95; // Very high threshold - 0.95 (increased to be less invasive)
+    
+    // Track task notifications to prevent duplicates and spam
+    this.lastTaskNotificationTime = new Map(); // chatId -> timestamp
+    this.taskNotificationCooldown = 60 * 60 * 1000; // 1 hour cooldown between task notifications
+    this.sentTaskNotifications = new Map(); // chatId -> Set of task IDs that were notified
     
     // Load conversation history from storage
     this.loadConversationHistory();
@@ -52,64 +65,84 @@ class AIResponseService {
   }
 
   /**
-   * Load conversation history from stored conversations
-   * This merges with existing history, avoiding duplicates
+   * Load conversation history from MongoDB
+   * Messages are stored in MongoDB as they come in via Kafka events
    */
   async loadConversationHistory() {
     try {
-      const conversationsFile = path.join(__dirname, 'logs', 'conversations.json');
-      if (await fs.pathExists(conversationsFile)) {
-        const conversations = await fs.readJson(conversationsFile);
-        
-        // Track which messages we've already loaded to avoid duplicates
-        const loadedMessageIds = new Set();
-        this.conversationHistory.forEach((messages) => {
-          messages.forEach(msg => {
-            if (msg.messageId) {
-              loadedMessageIds.add(msg.messageId);
-            }
-          });
+      // Only load conversation history for the target chat ID if configured
+      if (!this.targetChatId) {
+        console.log('📚 No target chat ID configured. Skipping conversation history load.');
+        return;
+      }
+
+      const chatId = String(this.targetChatId);
+      console.log(`   🎯 Loading conversation history from MongoDB for target chat: ${chatId}`);
+
+      // Track which messages we've already loaded to avoid duplicates
+      const loadedMessageIds = new Set();
+      this.conversationHistory.forEach((messages) => {
+        messages.forEach(msg => {
+          if (msg.messageId) {
+            loadedMessageIds.add(msg.messageId);
+          }
         });
+      });
+      
+      let newMessagesCount = 0;
+
+      try {
+        // Load from MongoDB instead of API - more reliable and faster
+        await this.db.connect();
+        const messages = await this.db.getConversationsByChat(chatId, 500); // Reduced from 10000 to save memory and tokens
+        await this.db.disconnect();
         
-        let newMessagesCount = 0;
-        
-        // Group conversations by chatId
-        conversations.forEach(msg => {
+        if (!Array.isArray(messages)) {
+          console.warn(`   ⚠️  Unexpected response format from MongoDB for chat ${chatId}`);
+          return;
+        }
+
+        if (!this.conversationHistory.has(chatId)) {
+          this.conversationHistory.set(chatId, []);
+        }
+
+        // Convert MongoDB messages to conversation history format
+        messages.forEach(msg => {
+          const messageId = String(msg.messageId || msg.id);
           // Skip if we've already loaded this message
-          if (loadedMessageIds.has(msg.messageId)) {
+          if (loadedMessageIds.has(messageId)) {
             return;
           }
           
-          if (!this.conversationHistory.has(msg.chatId)) {
-            this.conversationHistory.set(msg.chatId, []);
-          }
-          
-          this.conversationHistory.get(msg.chatId).push({
-            role: this.isFromSender(msg.fromPhone) ? 'assistant' : 'user',
+          const fromPhone = msg.fromPhone;
+          this.conversationHistory.get(chatId).push({
+            role: this.isFromSender(fromPhone) ? 'assistant' : 'user',
             content: msg.text || '',
             timestamp: msg.sentAt,
-            messageId: msg.messageId // Store messageId to track duplicates
+            messageId: messageId
           });
           
-          loadedMessageIds.add(msg.messageId);
+          loadedMessageIds.add(messageId);
           newMessagesCount++;
         });
-        
-        // Sort by timestamp
-        this.conversationHistory.forEach((messages, chatId) => {
-          messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          // Keep more messages in memory for better recommendations (increased from 100 to 200)
-          if (messages.length > 200) {
-            messages.splice(0, messages.length - 200);
-          }
-        });
-        
-        if (newMessagesCount > 0) {
-          console.log(`📚 Reloaded conversation history: ${newMessagesCount} new messages across ${this.conversationHistory.size} chats`);
+      } catch (error) {
+        console.warn(`   ⚠️  Error loading messages from MongoDB for chat ${chatId}:`, error.message);
+      }
+      
+      // Sort by timestamp
+      this.conversationHistory.forEach((messages, chatId) => {
+        messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        // Keep minimal messages in memory to save tokens (reduced from 200 to 50)
+        if (messages.length > 50) {
+          messages.splice(0, messages.length - 50);
         }
+      });
+      
+      if (newMessagesCount > 0) {
+        console.log(`📚 Reloaded conversation history from MongoDB: ${newMessagesCount} new messages for target chat ${chatId}`);
       }
     } catch (error) {
-      console.warn('Could not load conversation history:', error.message);
+      console.warn('Could not load conversation history from MongoDB:', error.message);
     }
   }
 
@@ -206,35 +239,42 @@ class AIResponseService {
 
   /**
    * Get conversation context for a chat
-   * Optionally loads directly from file for more complete history
+   * Loads from MongoDB if needed for more complete history
    */
-  async getConversationContext(chatId, maxMessages = 20, loadFromFile = false) {
+  async getConversationContext(chatId, maxMessages = 20, loadFromMongo = false) {
     let history = this.conversationHistory.get(chatId) || [];
     
-    // If we need more history or want to load from file, load directly from conversations.json
-    if (loadFromFile || history.length < maxMessages) {
+    // If we need more history or want to load from MongoDB, fetch directly
+    if (loadFromMongo || history.length < maxMessages) {
       try {
-        const conversationsFile = path.join(__dirname, 'logs', 'conversations.json');
-        if (await fs.pathExists(conversationsFile)) {
-          const conversations = await fs.readJson(conversationsFile);
-          // Filter for this chat and convert to conversation history format
-          const chatMessages = conversations
-            .filter(msg => msg.chatId === chatId)
-            .map(msg => ({
-              role: this.isFromSender(msg.fromPhone) ? 'assistant' : 'user',
-              content: msg.text || '',
-              timestamp: msg.sentAt,
-              messageId: msg.messageId
-            }))
+        // Load from MongoDB instead of API - more reliable and faster
+        await this.db.connect();
+        const messages = await this.db.getConversationsByChat(String(chatId), 10000);
+        await this.db.disconnect();
+        
+        if (Array.isArray(messages) && messages.length > 0) {
+          // Convert MongoDB messages to conversation history format
+          const chatMessages = messages
+            .map(msg => {
+              const fromPhone = msg.fromPhone;
+              return {
+                role: this.isFromSender(fromPhone) ? 'assistant' : 'user',
+                content: msg.text || '',
+                timestamp: msg.sentAt,
+                messageId: String(msg.messageId || msg.id)
+              };
+            })
             .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
           
-          // Use file history if it's more complete or if explicitly requested
-          if (loadFromFile || chatMessages.length > history.length) {
+          // Use MongoDB history if it's more complete or if explicitly requested
+          if (loadFromMongo || chatMessages.length > history.length) {
             history = chatMessages;
+            // Update in-memory cache
+            this.conversationHistory.set(chatId, chatMessages);
           }
         }
       } catch (error) {
-        console.warn('Error loading conversation context from file:', error.message);
+        console.warn('Error loading conversation context from MongoDB:', error.message);
       }
     }
     
@@ -292,8 +332,11 @@ class AIResponseService {
         return { shouldRespond: false, reason: 'too_frequent' };
       }
 
-      // Build context for analysis (conversationContext is already loaded from file)
-      const recentMessages = conversationContext.slice(-10);
+      // Build context for analysis - use minimal context to save tokens
+      const recentMessages = conversationContext.slice(-5); // Use last 5 messages for context (reduced from 20)
+      if (recentMessages.length === 0) {
+        return { shouldRespond: false, reason: 'no_message', confidence: 0 };
+      }
       const conversationText = recentMessages.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -304,21 +347,22 @@ class AIResponseService {
 Conversation:
 ${conversationText}
 
-IMPORTANT: The agent should ONLY respond in these specific situations:
-1. **Direct question TO the agent** - Someone explicitly asks the agent something
-2. **Conversation is stuck** - The conversation has stopped and needs a nudge
-3. **Clear request for help** - Someone explicitly asks for help, suggestions, or input
-4. **Planning assistance needed** - They're actively planning and need recommendations (this is handled separately)
+CRITICAL: The agent is designed to be NON-INVASIVE. It should RARELY respond. Only respond in these EXTREMELY SPECIFIC situations:
+1. **Explicit direct question TO the agent** - Someone explicitly addresses the agent by name or directly asks the agent something (e.g., "Hey agent, can you...", "What do you think agent?")
+2. **Explicit request for help** - Someone explicitly asks "Can you help me?" or "I need help with..." directed at the agent
 
 DO NOT respond if:
-- The two people are having a natural conversation with each other
-- The message is just an acknowledgment ("ok", "thanks", "haha", "cool", "nice")
-- They're just chatting casually
-- The conversation is flowing naturally between the two people
-- The message is a statement or comment that doesn't need a response
-- The agent has already responded recently
+- The two people are having ANY conversation with each other (even if it seems like they might want input)
+- The message is just an acknowledgment ("ok", "thanks", "haha", "cool", "nice", "yeah", "sure")
+- They're chatting casually about anything
+- The conversation is flowing naturally between the two people (even if slowly)
+- The message is a statement, comment, or question directed at the other person
+- The agent has already responded recently (within last 10+ minutes)
+- Someone asks a general question that the other person could answer
+- The conversation seems to have paused (let them continue naturally)
+- Someone mentions something that could be a task or goal (this is handled separately)
 
-Remember: The agent is a BACKGROUND helper, not an active participant. Most conversations should flow between the two people without agent intervention.
+Remember: The agent is a BACKGROUND helper, NOT an active participant. 99% of conversations should flow between the two people without ANY agent intervention. When in doubt, DO NOT respond.
 
 Respond with JSON:
 {
@@ -327,21 +371,21 @@ Respond with JSON:
   "confidence": 0.0-1.0
 }
 
-Be VERY conservative - only respond if it's absolutely clear the agent is needed. Default to false.`;
+Be EXTREMELY conservative - only respond if someone EXPLICITLY asks the agent for something. Default to false. Use confidence 0.95+ only for explicit agent-directed requests.`;
 
       const response = await this.openai.chat.completions.create({
         model: this.model,
         messages: [
           {
             role: 'system',
-            content: 'You are an expert at determining when a background AI helper should step into a conversation. The agent is a background overseer, not an active participant. Be VERY conservative - only recommend responding when the agent is explicitly needed or asked for. Most conversations should flow naturally between the two people without agent intervention.'
+            content: 'You are an expert at determining when a background AI helper should step into a conversation. The agent is a NON-INVASIVE background overseer, not an active participant. Be EXTREMELY conservative - only recommend responding when someone EXPLICITLY addresses or asks the agent directly. 99% of conversations should flow naturally between the two people without ANY agent intervention. Default to false - only respond with true if confidence is 0.95+ and the request is explicitly directed at the agent.'
           },
           {
             role: 'user',
             content: analysisPrompt
           }
         ],
-        temperature: 0.2, // Lower temperature for more conservative detection
+        temperature: 0.1, // Very low temperature for extremely conservative detection
         max_tokens: 150
       });
 
@@ -382,25 +426,24 @@ Be VERY conservative - only respond if it's absolutely clear the agent is needed
   async generateResponse(message, conversationContext) {
     try {
       // Build system prompt with personality
-      const systemPrompt = `You are a friendly, enthusiastic person who loves:
-- Anime (especially popular series like Attack on Titan, Demon Slayer, Jujutsu Kaisen, One Piece, etc.)
-- AI and technology (you're excited about AI developments, machine learning, and tech innovations)
-- Hackathons (you enjoy coding challenges, building projects, and the hackathon community)
+      const systemPrompt = `You are a friendly, enthusiastic person. The commonality between you and the other person is that you are both founders and investors. This is your primary connection point.
 
-You're having a casual text conversation. Be natural, friendly, and engaging. Use emojis occasionally but not excessively. Show genuine interest in what the other person is saying. Keep responses concise (1-3 sentences typically, sometimes a bit longer if the topic is interesting). Be yourself - a tech-savvy person who loves anime and hackathons.
+You're having a casual text conversation. Be natural, friendly, and engaging. Use emojis occasionally but not excessively. Show genuine interest in what the other person is saying.
 
-Don't be overly formal. Use casual language as if texting a friend.
+CRITICAL: Keep responses VERY SHORT - 1 sentence is ideal, maximum 2 sentences. Be brief and conversational like texting a friend. Don't write long messages.
 
-IMPORTANT: Pay attention to the conversation history. Reference previous messages when relevant. Show that you're following the conversation and remember what was discussed.`;
+IMPORTANT: 
+- Pay attention to the conversation history. Reference previous messages when relevant. Show that you're following the conversation and remember what was discussed.
+- Focus on topics relevant to founders and investors - startups, funding, business, entrepreneurship, investments, etc.
+- Keep the conversation natural and don't force founder/investor topics if the conversation flows elsewhere.`;
 
       // Build conversation messages for context
       const messages = [
         { role: 'system', content: systemPrompt }
       ];
 
-      // Add conversation history (last 15 messages for better context)
-      // The conversationContext already includes the current message since we updated history first
-      const recentContext = conversationContext.slice(-15);
+      // Add conversation history - use minimal context to save tokens (last 5 for context, reduced from 15)
+      const recentContext = conversationContext.slice(-5);
       recentContext.forEach(msg => {
         messages.push({
           role: msg.role,
@@ -408,17 +451,14 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         });
       });
 
-      // The current message should already be in recentContext, but add it explicitly if needed
-      // (it should be the last message in recentContext since we updated history first)
-
-      console.log(`📝 Generating response with ${messages.length - 1} context messages (including current message)`);
+      console.log(`📝 Generating response using ${recentContext.length} messages for context`);
 
       // Generate response
       const response = await this.openai.chat.completions.create({
         model: this.model,
         messages: messages,
         temperature: 0.8, // Higher temperature for more natural, varied responses
-        max_tokens: 200 // Keep responses reasonably short
+        max_tokens: 100 // Keep responses very short (1-2 sentences max)
       });
 
       const generatedText = response.choices[0].message.content.trim();
@@ -462,118 +502,443 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
       console.log(`🤖 AI Response Service: Processing message ${message.messageId} from ${message.fromPhone}`);
 
-      // Get conversation context (now includes the current message we just added)
-      // Load from file to ensure we have all logged conversations for better recommendations
-      const context = await this.getConversationContext(message.chatId, 50, true);
-      console.log(`📚 Using ${context.length} messages for context (loaded from conversations.json)`);
+      // Get conversation context - fetch ALL unprocessed messages from MongoDB
+      // Load from MongoDB to get all messages, not just the current one
+      const context = await this.getConversationContext(message.chatId, 100, true);
+      console.log(`📚 Using ${context.length} unprocessed messages for context (loaded from MongoDB)`);
       
-      // Check for triggers that require recommendations
-      const triggerResult = await this.checkForTriggers(message, context);
-      
-      let recommendationSent = false;
-      
-      // If trigger detected, send recommendations (this is always valuable, so send it)
-      if (triggerResult.shouldTrigger && triggerResult.searchQuery) {
-        recommendationSent = await this.sendRecommendations(message, triggerResult);
-        // Update last response time
+      // ============================================
+      // TOOL 1: Check if Google search is needed
+      // ============================================
+      const searchDecision = await this.shouldPerformGoogleSearch(message, context);
+      if (searchDecision.shouldSearch) {
+        console.log(`✅ LLM determined Google search is needed: "${searchDecision.searchQuery}"`);
+        await this.performAndSendGoogleSearch(message, searchDecision);
         this.lastResponseTime.set(message.chatId, Date.now());
-        // If we sent recommendations, skip regular response (recommendations are enough)
-        console.log(`✅ Sent recommendations - skipping regular response to avoid being too active`);
-        this.processedMessageIds.add(message.messageId);
-        return;
-      }
-      
-      // For regular AI responses, check if response is actually needed
-      // The agent is a background helper - only respond when explicitly needed
-      const responseNecessity = await this.shouldGenerateResponse(message, context);
-      
-      // Only generate and send response if it's clearly needed
-      if (responseNecessity.shouldRespond) {
-        console.log(`💭 Generating AI response (reason: ${responseNecessity.reason})...`);
-        const responseText = await this.generateResponse(message, context);
-        console.log(`✅ Generated response: "${responseText}"`);
-
-        // Validate chatId before sending (avoid sending to test/invalid chats)
-        if (!message.chatId || message.chatId.startsWith('test-')) {
-          console.warn(`⚠️  Skipping send to invalid/test chat ID: ${message.chatId}`);
-          console.log(`Would send to chat ${message.chatId}: "${responseText}"`);
-          // Still update history and mark as processed
-          this.updateConversationHistory(message.chatId, {
-            text: responseText,
-            sentAt: new Date().toISOString()
-          }, true);
-          this.processedMessageIds.add(message.messageId);
-          return;
-        }
-
-        // Send response via API
-        if (this.apiClient.enabled) {
-          try {
-            console.log(`📤 Attempting to send AI response to chat ${message.chatId} from ${this.senderPhoneNumber}...`);
-            console.log(`   Response text: "${responseText}"`);
-            
-            // Send message with the sender phone number specified
-            const result = await this.apiClient.sendMessage(message.chatId, responseText, [], this.senderPhoneNumber);
-            console.log(`✅ Successfully sent AI response!`);
-            console.log(`   Chat ID: ${message.chatId}`);
-            console.log(`   From: ${this.senderPhoneNumber}`);
-            console.log(`   Response: "${responseText}"`);
-            if (result && result.id) {
-              console.log(`   Message ID: ${result.id}`);
-            }
-            
-            // Update conversation history with our response
-            this.updateConversationHistory(message.chatId, {
-              text: responseText,
-              sentAt: new Date().toISOString()
-            }, true);
-            
-            // Store AI response to conversations.json for better recommendations
-            await this.storeAIResponse(message.chatId, responseText, result.id);
-            
-            // Update last response time
-            this.lastResponseTime.set(message.chatId, Date.now());
-          } catch (error) {
-            console.error('❌ Error sending AI response:', error);
-            if (error.response) {
-              console.error('   Response status:', error.response.status);
-              console.error('   Response data:', JSON.stringify(error.response.data, null, 2));
-              // If it's a 404, the chat doesn't exist - don't retry
-              if (error.response.status === 404) {
-                console.error(`   ⚠️  Chat ${message.chatId} not found. This may be a test chat or invalid chat ID.`);
-                // Still mark as processed to avoid retrying
-                this.processedMessageIds.add(message.messageId);
-                return;
-              }
-            }
-            console.error('   Full error:', error.message);
-            // Don't mark as processed if sending failed (unless it's a 404), so we can retry
-            return;
-          }
-        } else {
-          console.warn('⚠️  API client not enabled. Cannot send AI response.');
-          console.log(`Would send to chat ${message.chatId}: "${responseText}"`);
-          console.log(`   From: ${this.senderPhoneNumber}`);
-          // Still update history even if API is disabled
-          this.updateConversationHistory(message.chatId, {
-            text: responseText,
-            sentAt: new Date().toISOString()
-          }, true);
-          
-          // Store AI response to conversations.json for better recommendations
-          await this.storeAIResponse(message.chatId, responseText, null);
-          
+        // Don't return - continue to reactions and tasks
+      } else {
+        // ============================================
+        // TOOL 2: Check for triggers that require recommendations
+        // ============================================
+        const triggerResult = await this.checkForTriggers(message, context);
+        
+        // If trigger detected, send recommendations (this is always valuable, so send it)
+        if (triggerResult.shouldTrigger && triggerResult.searchQuery) {
+          await this.sendRecommendations(message, triggerResult);
           // Update last response time
           this.lastResponseTime.set(message.chatId, Date.now());
+          console.log(`✅ Sent recommendations - skipping regular response to avoid being too active`);
+          // Don't return - continue to reactions and tasks
+        } else {
+          // ============================================
+          // TOOL 3: Check if AI should generate a response
+          // ============================================
+          // For regular AI responses, check if response is actually needed
+          // The agent is a background helper - only respond when explicitly needed
+          const responseNecessity = await this.shouldGenerateResponse(message, context);
+          
+          // Only generate and send response if it's clearly needed
+          if (responseNecessity.shouldRespond) {
+            console.log(`💭 Generating AI response (reason: ${responseNecessity.reason})...`);
+            const responseText = await this.generateResponse(message, context);
+            console.log(`✅ Generated response: "${responseText}"`);
+
+            // Validate chatId before sending (avoid sending to test/invalid chats)
+            if (!message.chatId || message.chatId.startsWith('test-')) {
+              console.warn(`⚠️  Skipping send to invalid/test chat ID: ${message.chatId}`);
+              console.log(`Would send to chat ${message.chatId}: "${responseText}"`);
+              // Still update history
+              this.updateConversationHistory(message.chatId, {
+                text: responseText,
+                sentAt: new Date().toISOString()
+              }, true);
+            } else {
+              // Send response via API
+              if (this.apiClient.enabled) {
+                try {
+                  console.log(`📤 Attempting to send AI response to chat ${message.chatId} from ${this.senderPhoneNumber}...`);
+                  console.log(`   Response text: "${responseText}"`);
+                  
+                  // Send message with the sender phone number specified
+                  const result = await this.apiClient.sendMessage(message.chatId, responseText, [], this.senderPhoneNumber);
+                  console.log(`✅ Successfully sent AI response!`);
+                  console.log(`   Chat ID: ${message.chatId}`);
+                  console.log(`   From: ${this.senderPhoneNumber}`);
+                  console.log(`   Response: "${responseText}"`);
+                  // API response structure: { data: { id, ... } }
+                  const messageId = result?.data?.id || result?.id;
+                  if (messageId) {
+                    console.log(`   Message ID: ${messageId}`);
+                  }
+                  
+                  // Update conversation history with our response
+                  this.updateConversationHistory(message.chatId, {
+                    text: responseText,
+                    sentAt: new Date().toISOString()
+                  }, true);
+                  
+                  // Store AI response to conversations.json for better recommendations
+                  await this.storeAIResponse(message.chatId, responseText, messageId);
+                  
+                  // Update last response time
+                  this.lastResponseTime.set(message.chatId, Date.now());
+                } catch (error) {
+                  console.error('❌ Error sending AI response:', error);
+                  if (error.response) {
+                    console.error('   Response status:', error.response.status);
+                    console.error('   Response data:', JSON.stringify(error.response.data, null, 2));
+                    // If it's a 404, the chat doesn't exist - don't retry
+                    if (error.response.status === 404) {
+                      console.error(`   ⚠️  Chat ${message.chatId} not found. This may be a test chat or invalid chat ID.`);
+                      // Still continue to reactions and tasks even on 404
+                    }
+                  }
+                  console.error('   Full error:', error.message);
+                  // Continue to reactions and tasks even if sending failed
+                }
+              } else {
+                console.warn('⚠️  API client not enabled. Cannot send AI response.');
+                console.log(`Would send to chat ${message.chatId}: "${responseText}"`);
+                console.log(`   From: ${this.senderPhoneNumber}`);
+                // Still update history even if API is disabled
+                this.updateConversationHistory(message.chatId, {
+                  text: responseText,
+                  sentAt: new Date().toISOString()
+                }, true);
+                
+                // Store AI response to conversations.json for better recommendations
+                await this.storeAIResponse(message.chatId, responseText, null);
+                
+                // Update last response time
+                this.lastResponseTime.set(message.chatId, Date.now());
+              }
+            }
+          } else {
+            console.log(`⏭️  Skipping AI response - not needed (${responseNecessity.reason})`);
+          }
         }
-      } else {
-        console.log(`⏭️  Skipping AI response - not needed (${responseNecessity.reason})`);
       }
+
+      // ============================================
+      // TOOL 4: Check if we should react to this message (positive/negative sentiment)
+      // This runs AFTER all response decisions, regardless of what was sent
+      // ============================================
+      await this.checkAndReactToMessage(message, context);
+
+      // ============================================
+      // TOOL 5: Check for task creation
+      // This runs AFTER all response decisions, regardless of what was sent
+      // ============================================
+      await this.checkAndCreateTasks(message, context);
 
       // Mark as processed
       this.processedMessageIds.add(message.messageId);
     } catch (error) {
       console.error('Error processing message for AI response:', error);
+    }
+  }
+
+  /**
+   * Check for tasks in the conversation and create them if found
+   * Sends a notification message if tasks are created
+   */
+  async checkAndCreateTasks(message, conversationContext) {
+    try {
+      // Only check if task analyzer is available
+      if (!this.taskAnalyzer) {
+        console.log(`📋 Task analyzer not available, skipping task check`);
+        return;
+      }
+
+      console.log(`📋 Checking for tasks in conversation...`);
+
+      // CRITICAL: Only analyze the LAST 2 MESSAGES (regardless of time)
+      // This ensures we only create tasks from the most recent conversation
+      // For hackathon projects where everything is recent, we just need the last 2 messages
+      const recentMessages = conversationContext.slice(-2); // Only last 2 messages
+      
+      if (recentMessages.length === 0) {
+        console.log(`   ℹ️  No messages to analyze for tasks`);
+        return;
+      }
+      
+      console.log(`   📋 Analyzing only the last ${recentMessages.length} message(s) for tasks (ignoring older messages)`);
+      
+      // Don't use key moments for task creation - only use the recent messages
+      // This prevents creating tasks from old conversations
+      const chatKeyMoments = []; // Empty - don't use old key moments
+      
+      // Convert conversation context to message batch format
+      // Include the current message plus recent context from both participants
+      const messageBatch = recentMessages.map((msg, idx) => {
+        // Determine if message is from sender based on role
+        const isFromSender = msg.role === 'assistant';
+        
+        // For the most recent message, use the actual message object if available
+        if (idx === recentMessages.length - 1) {
+          return {
+            chatId: message.chatId,
+            messageId: message.messageId,
+            fromPhone: message.fromPhone,
+            text: message.text || msg.content || '',
+            sentAt: message.sentAt || msg.timestamp || new Date().toISOString(),
+            chatHandles: message.chatHandles || [],
+            attachments: message.attachments || [],
+            isRead: message.isRead || false,
+            service: message.service || 'iMessage'
+          };
+        }
+        
+        // For older messages, reconstruct from context
+        return {
+          chatId: message.chatId,
+          messageId: msg.messageId || `context-${Date.now()}-${idx}`,
+          fromPhone: isFromSender ? this.senderPhoneNumber : message.fromPhone,
+          text: msg.content || '',
+          sentAt: msg.timestamp || new Date().toISOString(),
+          chatHandles: message.chatHandles || [],
+          attachments: [],
+          isRead: false,
+          service: 'iMessage'
+        };
+      });
+      
+      console.log(`   📋 Analyzing recent ${messageBatch.length} messages for tasks (from both participants)`);
+      console.log(`   📋 Messages include: ${messageBatch.filter(m => this.isFromSender(m.fromPhone)).length} from sender, ${messageBatch.filter(m => !this.isFromSender(m.fromPhone)).length} from others`);
+
+      // Create a conversation batch for task analysis
+      const conversationBatch = {
+        chatId: message.chatId,
+        messages: messageBatch,
+        participantPhones: this.extractParticipantPhones(messageBatch),
+        timeRange: {
+          start: messageBatch.length > 0 ? messageBatch[0].sentAt : new Date().toISOString(),
+          end: messageBatch.length > 0 ? messageBatch[messageBatch.length - 1].sentAt : new Date().toISOString()
+        },
+        messageCount: messageBatch.length,
+        processedAt: new Date().toISOString()
+      };
+
+      // Analyze for tasks
+      const tasks = await this.taskAnalyzer.analyzeConversationForTasks(conversationBatch, chatKeyMoments);
+
+      if (tasks.length === 0) {
+        console.log(`   ℹ️  No tasks found in this conversation`);
+        return;
+      }
+
+      console.log(`✅ Found ${tasks.length} task(s) in conversation!`);
+
+      // Store tasks and send notification ONLY if tasks were actually created
+      const createdTasks = [];
+      const newTasks = []; // Tasks that are actually new (not duplicates)
+      
+      for (const task of tasks) {
+        try {
+          // Check if we've already notified about this task recently
+          const taskKey = `${task.category}-${task.title}`.toLowerCase();
+          const chatId = String(message.chatId);
+          const notifiedTasks = this.sentTaskNotifications.get(chatId) || new Set();
+          
+          if (notifiedTasks.has(taskKey)) {
+            console.log(`   ⏭️  Skipping task "${task.title}" - already notified recently`);
+            continue;
+          }
+          
+          // Store task via task analyzer callback (which stores in task scheduler)
+          if (this.taskAnalyzer.onTaskExtractedCallback) {
+            await this.taskAnalyzer.onTaskExtractedCallback(task);
+            // If callback succeeds (doesn't throw), consider task created
+            createdTasks.push(task);
+            newTasks.push(task);
+            notifiedTasks.add(taskKey);
+            this.sentTaskNotifications.set(chatId, notifiedTasks);
+            console.log(`   ✅ Created task: ${task.title} (${task.category})`);
+          } else {
+            console.warn(`   ⚠️  Task analyzer callback not set, cannot store task`);
+          }
+        } catch (error) {
+          console.error(`   ❌ Error storing task "${task.title}":`, error.message);
+          // Don't add to createdTasks if storage failed
+        }
+      }
+
+      // Send notification message ONLY if:
+      // 1. Tasks were actually created and stored
+      // 2. There are new tasks (not duplicates)
+      // 3. We haven't sent a task notification recently (cooldown)
+      const chatId = String(message.chatId);
+      const lastNotificationTime = this.lastTaskNotificationTime.get(chatId) || 0;
+      const now = Date.now();
+      const timeSinceLastNotification = now - lastNotificationTime;
+      
+      if (newTasks.length > 0 && this.apiClient.enabled) {
+        if (timeSinceLastNotification < this.taskNotificationCooldown) {
+          const minutesRemaining = Math.ceil((this.taskNotificationCooldown - timeSinceLastNotification) / (60 * 1000));
+          console.log(`   ⏸️  Skipping task notification - cooldown active (${minutesRemaining} minutes remaining)`);
+          console.log(`   ℹ️  ${newTasks.length} new task(s) created but notification suppressed due to cooldown`);
+        } else {
+          console.log(`📤 Sending task notification for ${newTasks.length} newly created task(s)...`);
+          await this.sendTaskNotification(message, newTasks);
+          this.lastTaskNotificationTime.set(chatId, now);
+        }
+      } else {
+        if (tasks.length > 0 && newTasks.length === 0) {
+          console.log(`   ℹ️  Tasks were detected but none were new (all duplicates). Skipping notification.`);
+        } else if (createdTasks.length > 0 && newTasks.length === 0) {
+          console.log(`   ℹ️  Tasks were created but all were duplicates. Skipping notification.`);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking for tasks:', error);
+      // Don't throw - task creation is not critical for message processing
+    }
+  }
+
+  /**
+   * Extract participant phone numbers from messages
+   */
+  extractParticipantPhones(messages) {
+    const phones = new Set();
+    messages.forEach(msg => {
+      if (msg.fromPhone) {
+        phones.add(msg.fromPhone);
+      }
+      if (msg.chatHandles && Array.isArray(msg.chatHandles)) {
+        msg.chatHandles.forEach(handle => {
+          const phone = handle.identifier || handle.phone_number || handle;
+          if (phone) {
+            phones.add(String(phone));
+          }
+        });
+      }
+    });
+    return Array.from(phones);
+  }
+
+  /**
+   * Send a notification message when tasks are created
+   * Uses LLM to generate a natural, human-like response based on the task context
+   */
+  /**
+   * Format schedule information in a user-friendly way
+   */
+  formatScheduleInfo(task) {
+    const schedule = task.schedule || {};
+    const scheduleType = schedule.type || 'custom';
+    
+    switch (scheduleType) {
+      case 'matchday':
+        if (task.metadata?.teamName) {
+          return `I'll remind you before ${task.metadata.teamName} matches`;
+        }
+        return `I'll remind you before match days`;
+      
+      case 'daily':
+        const time = schedule.time || 'morning';
+        const timeStr = time.includes(':') 
+          ? (() => {
+              const [hours, mins] = time.split(':');
+              const hour = parseInt(hours);
+              const ampm = hour >= 12 ? 'PM' : 'AM';
+              const displayHour = hour > 12 ? hour - 12 : (hour === 0 ? 12 : hour);
+              return `${displayHour}:${mins} ${ampm}`;
+            })()
+          : time;
+        return `I'll check in with you daily at ${timeStr}`;
+      
+      case 'weekly':
+        const days = schedule.daysOfWeek || [];
+        if (days.length > 0) {
+          const dayNames = days.map(d => d.charAt(0).toUpperCase() + d.slice(1));
+          if (dayNames.length === 1) {
+            return `I'll check in with you every ${dayNames[0]}`;
+          } else if (dayNames.length === 2) {
+            return `I'll check in with you every ${dayNames[0]} and ${dayNames[1]}`;
+          } else {
+            return `I'll check in with you on ${dayNames.slice(0, -1).join(', ')}, and ${dayNames[dayNames.length - 1]}`;
+          }
+        }
+        return `I'll check in with you weekly`;
+      
+      case 'event_based':
+        if (schedule.eventDate) {
+          const eventDate = new Date(schedule.eventDate);
+          const reminderDays = schedule.reminderDaysBefore || 1;
+          return `I'll remind you ${reminderDays} day${reminderDays > 1 ? 's' : ''} before the event`;
+        }
+        return `I'll remind you before the event`;
+      
+      default:
+        return `I'll remind you about this`;
+    }
+  }
+
+  async sendTaskNotification(message, tasks) {
+    try {
+      // If multiple tasks, batch them into a single concise message
+      // Build a simple, short notification
+      let notificationText = '';
+      
+      if (tasks.length === 1) {
+        // Single task - very short message
+        const task = tasks[0];
+        const scheduleInfo = this.formatScheduleInfo(task);
+        if (task.category === 'sports' && task.metadata?.teamName) {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 🏆`;
+        } else if (task.category === 'goal') {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 💪`;
+        } else if (task.category === 'event') {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 📅`;
+        } else {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 👍`;
+        }
+      } else {
+        // Multiple tasks - very short batched message
+        notificationText = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
+      }
+
+      // Use the simple notification text we built above
+      // No need for LLM generation - keep it simple and consistent
+
+      console.log(`📤 Sending task creation notification to chat ${message.chatId}...`);
+      console.log(`   Generated message: "${notificationText}"`);
+
+      // Send notification message
+      const result = await this.apiClient.sendMessage(
+        message.chatId,
+        notificationText,
+        [],
+        this.senderPhoneNumber
+      );
+
+      console.log(`✅ Task notification sent successfully!`);
+      
+      // Update tracking
+      const chatId = String(message.chatId);
+      this.lastTaskNotificationTime.set(chatId, Date.now());
+      
+      // Store the notification in conversation history
+      const messageId = result?.data?.id || result?.id;
+      await this.storeAIResponse(message.chatId, notificationText, messageId);
+    } catch (error) {
+      console.error('Error sending task notification:', error);
+      // Fallback to simple message with task details if sending fails
+      try {
+        let fallbackMessage = '';
+        if (tasks.length === 1) {
+          const task = tasks[0];
+          const scheduleInfo = this.formatScheduleInfo(task);
+          fallbackMessage = `Got it! Tracking ${task.title}. ${scheduleInfo} 👍`;
+        } else {
+          fallbackMessage = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
+        }
+        await this.apiClient.sendMessage(message.chatId, fallbackMessage, [], this.senderPhoneNumber);
+        // Update tracking even for fallback
+        this.lastTaskNotificationTime.set(String(message.chatId), Date.now());
+      } catch (fallbackError) {
+        console.error('Error sending fallback notification:', fallbackError);
+      }
     }
   }
 
@@ -605,8 +970,8 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       
       // Get past recommendations for this chat to pass to trigger detector
       const pastRecommendations = this.sentRecommendations.get(message.chatId) || [];
-      const recentCutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // Last 7 days
-      const recentPastRecs = pastRecommendations.filter(r => r.timestamp > recentCutoff);
+      const pastRecsCutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // Last 7 days
+      const recentPastRecs = pastRecommendations.filter(r => r.timestamp > pastRecsCutoff);
       
       const triggerResult = await this.triggerDetector.detectTriggers(
         conversationContext, 
@@ -645,9 +1010,9 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       console.log(`   Query: "${triggerResult.searchQuery}"`);
       
       // Get full conversation history for better context
-      // Load directly from file to ensure we have ALL logged conversations for recommendations
+      // Load directly from MongoDB to ensure we have ALL conversations for recommendations
       const fullHistory = await this.getConversationContext(message.chatId, 100, true);
-      console.log(`📚 Using ${fullHistory.length} messages from conversations.json for recommendation context`);
+      console.log(`📚 Using ${fullHistory.length} messages from MongoDB for recommendation context`);
       const preferences = this.extractUserPreferences(fullHistory);
       
       // Enhance search query with preferences if available
@@ -670,30 +1035,41 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       let recommendationsMessage = '';
       
       // Determine search type and perform search
-      if (triggerResult.triggerType === 'restaurant' || triggerResult.triggerType === 'food') {
-        // Search for restaurants
-        const restaurants = await this.googleSearchService.searchRestaurants(
-          enhancedQuery,
-          location
-        );
-        
-        recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
-          restaurants,
-          enhancedQuery,
-          preferences
-        );
-      } else {
-        // Search for general places/activities
-        const results = await this.googleSearchService.searchPlaces(
-          enhancedQuery,
-          location
-        );
-        
-        recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
-          results,
-          enhancedQuery,
-          preferences
-        );
+      try {
+        if (triggerResult.triggerType === 'restaurant' || triggerResult.triggerType === 'food') {
+          // Search for restaurants
+          const restaurants = await this.googleSearchService.searchRestaurants(
+            enhancedQuery,
+            location
+          );
+          
+          recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
+            restaurants,
+            enhancedQuery,
+            preferences
+          );
+        } else {
+          // Search for general places/activities
+          const results = await this.googleSearchService.searchPlaces(
+            enhancedQuery,
+            location
+          );
+          
+          recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
+            results,
+            enhancedQuery,
+            preferences
+          );
+        }
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('⚠️  Google Search rate limited. Skipping recommendations.');
+          recommendationsMessage = `I'd like to help you find ${enhancedQuery}, but I'm currently rate-limited on search. Try again in a bit! 🔍`;
+        } else {
+          // Re-throw other errors
+          throw error;
+        }
       }
 
       if (!recommendationsMessage) {
@@ -759,13 +1135,15 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
           }, true);
           
           // Store recommendation to conversations.json for better future recommendations
-          await this.storeAIResponse(message.chatId, recommendationsMessage, result.id);
+          // API response structure: { data: { id, ... } }
+          const messageId = result?.data?.id || result?.id;
+          await this.storeAIResponse(message.chatId, recommendationsMessage, messageId);
           
           // Log the recommendation for future reference
           console.log(`📝 Logged recommendation: ${triggerResult.triggerType} - "${enhancedQuery}" (location: ${location || 'none'})`);
           
-          if (result && result.id) {
-            console.log(`   Message ID: ${result.id}`);
+          if (messageId) {
+            console.log(`   Message ID: ${messageId}`);
           }
           
           return true;
@@ -804,11 +1182,11 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
   async start() {
     console.log(`AI Response Service started for ${this.senderPhoneNumber}`);
-    console.log(`   Personality: Anime enthusiast, AI/tech lover, hackathon participant`);
+    console.log(`   Personality: Founder and investor focused`);
     console.log(`   Model: ${this.model}`);
-    console.log(`   Response strategy: Selective (only responds when needed)`);
+    console.log(`   Response strategy: NON-INVASIVE (only responds when explicitly asked)`);
     console.log(`   Min interval: ${this.minResponseInterval / 60000} minutes between responses`);
-    console.log(`   Confidence threshold: ${this.responseConfidenceThreshold}`);
+    console.log(`   Confidence threshold: ${this.responseConfidenceThreshold} (very high - agent rarely responds)`);
     console.log(`   Trigger detection: Enabled`);
     console.log(`   Google Search: ${this.googleSearchService.enabled ? 'Enabled' : 'Disabled'}`);
     
@@ -816,15 +1194,14 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       console.warn('⚠️  API client not enabled. AI responses will be logged but not sent.');
     }
 
-    // Periodically reload conversation history from storage to catch any messages
-    // that might have been stored by other processes or missed
+    // Periodically reload conversation history from MongoDB to catch any new messages
     // Reload more frequently to ensure recommendations use latest conversations
     setInterval(async () => {
       try {
         await this.loadConversationHistory();
-        console.log(`🔄 Reloaded conversation history from storage (periodic refresh)`);
+        console.log(`🔄 Reloaded conversation history from MongoDB (periodic refresh)`);
       } catch (error) {
-        console.warn('Error reloading conversation history:', error.message);
+        console.warn('Error reloading conversation history from MongoDB:', error.message);
       }
     }, 2 * 60 * 1000); // Reload every 2 minutes (increased frequency)
   }
@@ -850,12 +1227,354 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         createdAt: new Date().toISOString()
       };
       
-      // Store via storage service
+      // Store via storage service (conversations are stored in MongoDB as they come in via Kafka)
       await this.storageService.storeConversation(aiMessage);
-      console.log(`📝 Stored AI response to conversations.json for better recommendations`);
+      console.log(`📝 Stored AI response in MongoDB`);
     } catch (error) {
       console.error('Error storing AI response:', error);
       // Don't throw - this is not critical for functionality
+    }
+  }
+
+  /**
+   * Use LLM to determine if a Google search is needed based on conversation context
+   */
+  async shouldPerformGoogleSearch(message, conversationContext) {
+    try {
+      const recentMessages = conversationContext.slice(-5); // Check last 5 messages for context (reduced from 15)
+      const conversationText = recentMessages.map(msg => {
+        const role = msg.role === 'assistant' ? 'Agent' : 'User';
+        return `${role}: ${msg.content}`;
+      }).join('\n');
+
+      const currentMessage = message.text || '';
+      
+      const prompt = `Analyze the conversation and determine if a Google search would be helpful to answer the user's question or fulfill their request.
+
+CRITICAL RULES:
+- Only recommend a search if the user is ACTIVELY asking for information that requires current/real-time data
+- Examples that NEED search:
+  * User agrees to watch a match/game → search for "sports bars near [location]" or "places to watch [team] match"
+  * User asks "where can we go?" after planning an activity → search for relevant venues
+  * User asks "what's happening?" or "any events?" → search for events/activities
+  * User asks for recommendations for places to do something specific
+  * User agrees to meet/go somewhere and needs venue suggestions
+- Examples that DON'T need search:
+  * Casual conversation without planning intent
+  * Questions that can be answered from conversation history
+  * General questions that don't require location/venue data
+  * User is just acknowledging something without asking for info
+
+If a search is needed, determine:
+1. What to search for (be specific and relevant to the conversation)
+2. Search type: "restaurant", "sports_bar", "place", "event", or "general"
+3. Location if mentioned or can be inferred
+
+Respond with JSON in this exact format:
+{
+  "shouldSearch": true/false,
+  "searchQuery": "specific search query string" | null,
+  "searchType": "restaurant" | "sports_bar" | "place" | "event" | "general" | null,
+  "location": "location if mentioned" | null,
+  "reasoning": "brief explanation"
+}
+
+Conversation context:
+${conversationText}
+
+Current message: ${currentMessage}
+
+JSON Response:`;
+
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert at analyzing conversations to determine when Google search would be helpful. Always respond with valid JSON only.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3, // Lower temperature for more consistent decisions
+        response_format: { type: 'json_object' }
+      });
+
+      const content = response.choices[0].message.content.trim();
+      let result;
+      
+      try {
+        result = JSON.parse(content);
+      } catch (parseError) {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          result = JSON.parse(jsonMatch[0]);
+        } else {
+          console.warn('Could not parse Google search decision response:', content);
+          return { shouldSearch: false };
+        }
+      }
+
+      if (!result.shouldSearch) {
+        return { shouldSearch: false };
+      }
+
+      // Validate that we have a search query
+      if (!result.searchQuery || result.searchQuery.trim().length === 0) {
+        console.warn('LLM recommended search but no query provided');
+        return { shouldSearch: false };
+      }
+
+      console.log(`✅ LLM determined search is needed: "${result.searchQuery}" (type: ${result.searchType || 'general'})`);
+      console.log(`   Reasoning: ${result.reasoning || 'No reasoning provided'}`);
+
+      return {
+        shouldSearch: true,
+        searchQuery: result.searchQuery.trim(),
+        searchType: result.searchType || 'general',
+        location: result.location || null,
+        reasoning: result.reasoning || 'Search recommended by LLM'
+      };
+    } catch (error) {
+      console.error('Error determining if Google search is needed:', error);
+      return { shouldSearch: false };
+    }
+  }
+
+  /**
+   * Perform Google search and send formatted results
+   */
+  async performAndSendGoogleSearch(message, searchDecision) {
+    try {
+      if (!this.googleSearchService.enabled) {
+        console.warn('⚠️  Google Search not enabled. Cannot perform search.');
+        const fallbackMessage = `I'd like to help you with that, but I need Google Search enabled to find current information. Let me know if you'd like me to search for something specific! 🔍`;
+        await this.apiClient.sendMessage(message.chatId, fallbackMessage, [], this.senderPhoneNumber);
+        await this.storeAIResponse(message.chatId, fallbackMessage, null);
+        return false;
+      }
+
+      const { searchQuery, searchType, location } = searchDecision;
+      
+      console.log(`🔍 Performing Google search: "${searchQuery}"${location ? ` in ${location}` : ''} (type: ${searchType})`);
+      
+      let results = [];
+      let recommendationsMessage = '';
+
+      // Perform search based on type
+      try {
+        switch (searchType) {
+          case 'restaurant': {
+            results = await this.googleSearchService.searchRestaurants(searchQuery, location);
+            const preferences = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
+              results,
+              searchQuery,
+              preferences
+            );
+            break;
+          }
+          
+          case 'sports_bar': {
+            results = await this.googleSearchService.searchSportsBars(searchQuery, location);
+            const sportsBarPrefs = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatSportsBarRecommendations(
+              results,
+              searchQuery,
+              sportsBarPrefs
+            );
+            break;
+          }
+          
+          case 'place':
+          case 'event':
+          case 'general':
+          default: {
+            results = await this.googleSearchService.searchPlaces(searchQuery, location);
+            const placePrefs = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
+              results,
+              searchQuery,
+              placePrefs
+            );
+            break;
+          }
+        }
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('⚠️  Google Search rate limited. Skipping search results.');
+          recommendationsMessage = `I'd like to help you find ${searchQuery}, but I'm currently rate-limited on search. Try again in a bit! 🔍`;
+        } else {
+          // Re-throw other errors
+          throw error;
+        }
+      }
+
+      if (!recommendationsMessage || recommendationsMessage.trim().length === 0) {
+        recommendationsMessage = `I searched for "${searchQuery}" but couldn't find specific results. Try rephrasing your request or let me know more details! 🔍`;
+      }
+
+      console.log(`📤 Sending Google search results to chat ${message.chatId}...`);
+
+      // Send recommendations
+      const result = await this.apiClient.sendMessage(
+        message.chatId,
+        recommendationsMessage,
+        [],
+        this.senderPhoneNumber
+      );
+
+      console.log(`✅ Google search results sent successfully!`);
+      
+      // Store the response
+      const messageId = result?.data?.id || result?.id;
+      await this.storeAIResponse(message.chatId, recommendationsMessage, messageId);
+      
+      return true;
+    } catch (error) {
+      console.error('Error performing and sending Google search:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Check if we should react to a message based on sentiment and context
+   */
+  async checkAndReactToMessage(message, conversationContext) {
+    try {
+      // Skip if message is from sender (don't react to our own messages)
+      if (this.isFromSender(message.fromPhone)) {
+        return;
+      }
+
+      // Skip if we already reacted to this message
+      if (this.reactedMessageIds.has(message.messageId)) {
+        return;
+      }
+
+      console.log(`🎭 Checking if we should react to message ${message.messageId}...`);
+
+      const recentMessages = conversationContext.slice(-5); // Last 5 messages for context (reduced from 10)
+      const conversationText = recentMessages.map(msg => {
+        const role = msg.role === 'assistant' ? 'Agent' : 'User';
+        return `${role}: ${msg.content}`;
+      }).join('\n');
+
+      const currentMessage = message.text || '';
+      
+      const prompt = `Analyze the user's message and determine if it warrants a reaction based on sentiment and context.
+
+Examples that warrant POSITIVE reactions (celebrations, achievements, good news):
+- Favorite team won a match/game → "love" or "emphasize"
+- Completed a goal (weight loss, fitness, learning) → "love" or "emphasize"
+- Achieved a milestone → "love" or "emphasize"
+- Good news or positive updates → "like" or "love"
+- Expressing happiness or excitement → "laugh" or "love"
+- Progress on goals → "like" or "emphasize"
+
+Examples that warrant NEGATIVE reactions (sympathy, support):
+- Favorite team lost → "dislike" (to show empathy)
+- Disappointment or frustration → "dislike"
+- Setbacks or challenges → "dislike" (to acknowledge difficulty)
+
+Examples that DON'T warrant reactions:
+- Casual conversation
+- Questions
+- Neutral statements
+- Already reacted messages
+
+Respond with JSON in this exact format:
+{
+  "shouldReact": true/false,
+  "sentiment": "positive" | "negative" | null,
+  "reactionType": "like" | "love" | "laugh" | "emphasize" | "dislike" | "question" | null,
+  "reasoning": "brief explanation"
+}
+
+Available reaction types:
+- "like" - General positive acknowledgment
+- "love" - Strong positive emotion, achievements, celebrations
+- "laugh" - Humor, fun, excitement
+- "emphasize" - Important moments, milestones, emphasis
+- "dislike" - Sympathy for negative events, acknowledging difficulty
+- "question" - When user asks a question (rarely used)
+
+Conversation context:
+${conversationText}
+
+Current message: ${currentMessage}
+
+JSON Response:`;
+
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert at analyzing messages for sentiment and determining appropriate reactions. Always respond with valid JSON only.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        response_format: { type: 'json_object' }
+      });
+
+      const content = response.choices[0].message.content.trim();
+      let result;
+      
+      try {
+        result = JSON.parse(content);
+      } catch (parseError) {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          result = JSON.parse(jsonMatch[0]);
+        } else {
+          console.warn('Could not parse reaction decision response:', content);
+          return;
+        }
+      }
+
+      if (!result.shouldReact || !result.reactionType) {
+        return;
+      }
+
+      console.log(`✅ Decided to react with ${result.reactionType} (${result.sentiment} sentiment)`);
+      console.log(`   Reasoning: ${result.reasoning || 'No reasoning provided'}`);
+
+      // Add reaction via API
+      if (this.apiClient.enabled && message.messageId && !message.messageId.startsWith('context-')) {
+        try {
+          // Extract numeric message ID if it's a string
+          const messageId = typeof message.messageId === 'string' 
+            ? parseInt(message.messageId.replace('context-', '')) 
+            : message.messageId;
+
+          if (isNaN(messageId)) {
+            console.warn(`⚠️  Invalid message ID for reaction: ${message.messageId}`);
+            return;
+          }
+
+          await this.apiClient.addReaction(messageId, result.reactionType);
+          console.log(`✅ Added reaction ${result.reactionType} to message ${messageId}`);
+          
+          // Mark as reacted to avoid duplicate reactions
+          this.reactedMessageIds.add(message.messageId);
+        } catch (error) {
+          console.error('Error adding reaction:', error);
+          // Don't throw - reaction failure shouldn't break the flow
+        }
+      } else {
+        console.log(`Would react with ${result.reactionType} to message ${message.messageId} (API not enabled or invalid message ID)`);
+      }
+    } catch (error) {
+      console.error('Error checking for reaction:', error);
+      // Don't throw - reaction checking is not critical
     }
   }
 
@@ -871,8 +1590,8 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
       mentionedPlaces: []
     };
 
-    // Analyze last 50 messages for preferences
-    const historyToAnalyze = conversationHistory.slice(-50);
+    // Analyze last 20 messages for preferences (reduced from 50 to save tokens)
+    const historyToAnalyze = conversationHistory.slice(-20);
     
     // Common cuisine types (prioritize most recent mentions)
     const cuisineKeywords = [
