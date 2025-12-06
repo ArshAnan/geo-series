@@ -49,8 +49,13 @@ class AIResponseService {
     
     // Track last response time per chat to avoid responding too frequently
     this.lastResponseTime = new Map(); // chatId -> timestamp
-    this.minResponseInterval = (config.aiResponseMinIntervalMinutes || 5) * 60 * 1000; // Minimum 5 minutes between responses (increased)
-    this.responseConfidenceThreshold = config.aiResponseConfidenceThreshold || 0.85; // Higher threshold - 0.85 (increased from 0.7)
+    this.minResponseInterval = (config.aiResponseMinIntervalMinutes || 10) * 60 * 1000; // Minimum 10 minutes between responses (increased to be less invasive)
+    this.responseConfidenceThreshold = config.aiResponseConfidenceThreshold || 0.95; // Very high threshold - 0.95 (increased to be less invasive)
+    
+    // Track task notifications to prevent duplicates and spam
+    this.lastTaskNotificationTime = new Map(); // chatId -> timestamp
+    this.taskNotificationCooldown = 60 * 60 * 1000; // 1 hour cooldown between task notifications
+    this.sentTaskNotifications = new Map(); // chatId -> Set of task IDs that were notified
     
     // Load conversation history from storage
     this.loadConversationHistory();
@@ -89,7 +94,7 @@ class AIResponseService {
       try {
         // Load from MongoDB instead of API - more reliable and faster
         await this.db.connect();
-        const messages = await this.db.getConversationsByChat(chatId, 10000);
+        const messages = await this.db.getConversationsByChat(chatId, 500); // Reduced from 10000 to save memory and tokens
         await this.db.disconnect();
         
         if (!Array.isArray(messages)) {
@@ -127,9 +132,9 @@ class AIResponseService {
       // Sort by timestamp
       this.conversationHistory.forEach((messages, chatId) => {
         messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-        // Keep more messages in memory for better recommendations (increased from 100 to 200)
-        if (messages.length > 200) {
-          messages.splice(0, messages.length - 200);
+        // Keep minimal messages in memory to save tokens (reduced from 200 to 50)
+        if (messages.length > 50) {
+          messages.splice(0, messages.length - 50);
         }
       });
       
@@ -327,8 +332,8 @@ class AIResponseService {
         return { shouldRespond: false, reason: 'too_frequent' };
       }
 
-      // Build context for analysis - use ALL unprocessed messages
-      const recentMessages = conversationContext.slice(-20); // Use last 20 messages for context
+      // Build context for analysis - use minimal context to save tokens
+      const recentMessages = conversationContext.slice(-5); // Use last 5 messages for context (reduced from 20)
       if (recentMessages.length === 0) {
         return { shouldRespond: false, reason: 'no_message', confidence: 0 };
       }
@@ -342,21 +347,22 @@ class AIResponseService {
 Conversation:
 ${conversationText}
 
-IMPORTANT: The agent should ONLY respond in these specific situations:
-1. **Direct question TO the agent** - Someone explicitly asks the agent something
-2. **Conversation is stuck** - The conversation has stopped and needs a nudge
-3. **Clear request for help** - Someone explicitly asks for help, suggestions, or input
-4. **Planning assistance needed** - They're actively planning and need recommendations (this is handled separately)
+CRITICAL: The agent is designed to be NON-INVASIVE. It should RARELY respond. Only respond in these EXTREMELY SPECIFIC situations:
+1. **Explicit direct question TO the agent** - Someone explicitly addresses the agent by name or directly asks the agent something (e.g., "Hey agent, can you...", "What do you think agent?")
+2. **Explicit request for help** - Someone explicitly asks "Can you help me?" or "I need help with..." directed at the agent
 
 DO NOT respond if:
-- The two people are having a natural conversation with each other
-- The message is just an acknowledgment ("ok", "thanks", "haha", "cool", "nice")
-- They're just chatting casually
-- The conversation is flowing naturally between the two people
-- The message is a statement or comment that doesn't need a response
-- The agent has already responded recently
+- The two people are having ANY conversation with each other (even if it seems like they might want input)
+- The message is just an acknowledgment ("ok", "thanks", "haha", "cool", "nice", "yeah", "sure")
+- They're chatting casually about anything
+- The conversation is flowing naturally between the two people (even if slowly)
+- The message is a statement, comment, or question directed at the other person
+- The agent has already responded recently (within last 10+ minutes)
+- Someone asks a general question that the other person could answer
+- The conversation seems to have paused (let them continue naturally)
+- Someone mentions something that could be a task or goal (this is handled separately)
 
-Remember: The agent is a BACKGROUND helper, not an active participant. Most conversations should flow between the two people without agent intervention.
+Remember: The agent is a BACKGROUND helper, NOT an active participant. 99% of conversations should flow between the two people without ANY agent intervention. When in doubt, DO NOT respond.
 
 Respond with JSON:
 {
@@ -365,21 +371,21 @@ Respond with JSON:
   "confidence": 0.0-1.0
 }
 
-Be VERY conservative - only respond if it's absolutely clear the agent is needed. Default to false.`;
+Be EXTREMELY conservative - only respond if someone EXPLICITLY asks the agent for something. Default to false. Use confidence 0.95+ only for explicit agent-directed requests.`;
 
       const response = await this.openai.chat.completions.create({
         model: this.model,
         messages: [
           {
             role: 'system',
-            content: 'You are an expert at determining when a background AI helper should step into a conversation. The agent is a background overseer, not an active participant. Be VERY conservative - only recommend responding when the agent is explicitly needed or asked for. Most conversations should flow naturally between the two people without agent intervention.'
+            content: 'You are an expert at determining when a background AI helper should step into a conversation. The agent is a NON-INVASIVE background overseer, not an active participant. Be EXTREMELY conservative - only recommend responding when someone EXPLICITLY addresses or asks the agent directly. 99% of conversations should flow naturally between the two people without ANY agent intervention. Default to false - only respond with true if confidence is 0.95+ and the request is explicitly directed at the agent.'
           },
           {
             role: 'user',
             content: analysisPrompt
           }
         ],
-        temperature: 0.2, // Lower temperature for more conservative detection
+        temperature: 0.1, // Very low temperature for extremely conservative detection
         max_tokens: 150
       });
 
@@ -420,24 +426,24 @@ Be VERY conservative - only respond if it's absolutely clear the agent is needed
   async generateResponse(message, conversationContext) {
     try {
       // Build system prompt with personality
-      const systemPrompt = `You are a friendly, enthusiastic person who loves:
-- Anime (especially popular series like Attack on Titan, Demon Slayer, Jujutsu Kaisen, One Piece, etc.)
-- AI and technology (you're excited about AI developments, machine learning, and tech innovations)
-- Hackathons (you enjoy coding challenges, building projects, and the hackathon community)
+      const systemPrompt = `You are a friendly, enthusiastic person. The commonality between you and the other person is that you are both founders and investors. This is your primary connection point.
 
-You're having a casual text conversation. Be natural, friendly, and engaging. Use emojis occasionally but not excessively. Show genuine interest in what the other person is saying. Keep responses concise (1-3 sentences typically, sometimes a bit longer if the topic is interesting). Be yourself - a tech-savvy person who loves anime and hackathons.
+You're having a casual text conversation. Be natural, friendly, and engaging. Use emojis occasionally but not excessively. Show genuine interest in what the other person is saying.
 
-Don't be overly formal. Use casual language as if texting a friend.
+CRITICAL: Keep responses VERY SHORT - 1 sentence is ideal, maximum 2 sentences. Be brief and conversational like texting a friend. Don't write long messages.
 
-IMPORTANT: Pay attention to the conversation history. Reference previous messages when relevant. Show that you're following the conversation and remember what was discussed.`;
+IMPORTANT: 
+- Pay attention to the conversation history. Reference previous messages when relevant. Show that you're following the conversation and remember what was discussed.
+- Focus on topics relevant to founders and investors - startups, funding, business, entrepreneurship, investments, etc.
+- Keep the conversation natural and don't force founder/investor topics if the conversation flows elsewhere.`;
 
       // Build conversation messages for context
       const messages = [
         { role: 'system', content: systemPrompt }
       ];
 
-      // Add conversation history - use ALL unprocessed messages (last 15 for context)
-      const recentContext = conversationContext.slice(-15);
+      // Add conversation history - use minimal context to save tokens (last 5 for context, reduced from 15)
+      const recentContext = conversationContext.slice(-5);
       recentContext.forEach(msg => {
         messages.push({
           role: msg.role,
@@ -452,7 +458,7 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
         model: this.model,
         messages: messages,
         temperature: 0.8, // Higher temperature for more natural, varied responses
-        max_tokens: 200 // Keep responses reasonably short
+        max_tokens: 100 // Keep responses very short (1-2 sentences max)
       });
 
       const generatedText = response.choices[0].message.content.trim();
@@ -646,26 +652,59 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
       console.log(`📋 Checking for tasks in conversation...`);
 
-      // Get key moments for context
-      const keyMoments = await this.storageService.loadKeyMoments();
-      const chatKeyMoments = keyMoments.filter(m => m.chatId === message.chatId);
-
-      // CRITICAL: Only analyze the CURRENT message for tasks
-      // Don't use old messages - only the message that was just received
-      // This prevents creating tasks from previous conversations when user sends a simple "Hey"
-      const messageBatch = [{
-        chatId: message.chatId,
-        messageId: message.messageId,
-        fromPhone: message.fromPhone,
-        text: message.text || '',
-        sentAt: message.sentAt,
-        chatHandles: message.chatHandles || [],
-        attachments: message.attachments || [],
-        isRead: message.isRead || false,
-        service: message.service || 'iMessage'
-      }];
+      // CRITICAL: Only analyze the LAST 2 MESSAGES (regardless of time)
+      // This ensures we only create tasks from the most recent conversation
+      // For hackathon projects where everything is recent, we just need the last 2 messages
+      const recentMessages = conversationContext.slice(-2); // Only last 2 messages
       
-      console.log(`   📋 Analyzing ONLY the current message for tasks: "${message.text}"`);
+      if (recentMessages.length === 0) {
+        console.log(`   ℹ️  No messages to analyze for tasks`);
+        return;
+      }
+      
+      console.log(`   📋 Analyzing only the last ${recentMessages.length} message(s) for tasks (ignoring older messages)`);
+      
+      // Don't use key moments for task creation - only use the recent messages
+      // This prevents creating tasks from old conversations
+      const chatKeyMoments = []; // Empty - don't use old key moments
+      
+      // Convert conversation context to message batch format
+      // Include the current message plus recent context from both participants
+      const messageBatch = recentMessages.map((msg, idx) => {
+        // Determine if message is from sender based on role
+        const isFromSender = msg.role === 'assistant';
+        
+        // For the most recent message, use the actual message object if available
+        if (idx === recentMessages.length - 1) {
+          return {
+            chatId: message.chatId,
+            messageId: message.messageId,
+            fromPhone: message.fromPhone,
+            text: message.text || msg.content || '',
+            sentAt: message.sentAt || msg.timestamp || new Date().toISOString(),
+            chatHandles: message.chatHandles || [],
+            attachments: message.attachments || [],
+            isRead: message.isRead || false,
+            service: message.service || 'iMessage'
+          };
+        }
+        
+        // For older messages, reconstruct from context
+        return {
+          chatId: message.chatId,
+          messageId: msg.messageId || `context-${Date.now()}-${idx}`,
+          fromPhone: isFromSender ? this.senderPhoneNumber : message.fromPhone,
+          text: msg.content || '',
+          sentAt: msg.timestamp || new Date().toISOString(),
+          chatHandles: message.chatHandles || [],
+          attachments: [],
+          isRead: false,
+          service: 'iMessage'
+        };
+      });
+      
+      console.log(`   📋 Analyzing recent ${messageBatch.length} messages for tasks (from both participants)`);
+      console.log(`   📋 Messages include: ${messageBatch.filter(m => this.isFromSender(m.fromPhone)).length} from sender, ${messageBatch.filter(m => !this.isFromSender(m.fromPhone)).length} from others`);
 
       // Create a conversation batch for task analysis
       const conversationBatch = {
@@ -690,26 +729,65 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
       console.log(`✅ Found ${tasks.length} task(s) in conversation!`);
 
-      // Store tasks and send notification
+      // Store tasks and send notification ONLY if tasks were actually created
       const createdTasks = [];
+      const newTasks = []; // Tasks that are actually new (not duplicates)
+      
       for (const task of tasks) {
         try {
+          // Check if we've already notified about this task recently
+          const taskKey = `${task.category}-${task.title}`.toLowerCase();
+          const chatId = String(message.chatId);
+          const notifiedTasks = this.sentTaskNotifications.get(chatId) || new Set();
+          
+          if (notifiedTasks.has(taskKey)) {
+            console.log(`   ⏭️  Skipping task "${task.title}" - already notified recently`);
+            continue;
+          }
+          
           // Store task via task analyzer callback (which stores in task scheduler)
           if (this.taskAnalyzer.onTaskExtractedCallback) {
             await this.taskAnalyzer.onTaskExtractedCallback(task);
+            // If callback succeeds (doesn't throw), consider task created
             createdTasks.push(task);
+            newTasks.push(task);
+            notifiedTasks.add(taskKey);
+            this.sentTaskNotifications.set(chatId, notifiedTasks);
             console.log(`   ✅ Created task: ${task.title} (${task.category})`);
           } else {
             console.warn(`   ⚠️  Task analyzer callback not set, cannot store task`);
           }
         } catch (error) {
           console.error(`   ❌ Error storing task "${task.title}":`, error.message);
+          // Don't add to createdTasks if storage failed
         }
       }
 
-      // Send notification message if tasks were created
-      if (createdTasks.length > 0 && this.apiClient.enabled) {
-        await this.sendTaskNotification(message, createdTasks);
+      // Send notification message ONLY if:
+      // 1. Tasks were actually created and stored
+      // 2. There are new tasks (not duplicates)
+      // 3. We haven't sent a task notification recently (cooldown)
+      const chatId = String(message.chatId);
+      const lastNotificationTime = this.lastTaskNotificationTime.get(chatId) || 0;
+      const now = Date.now();
+      const timeSinceLastNotification = now - lastNotificationTime;
+      
+      if (newTasks.length > 0 && this.apiClient.enabled) {
+        if (timeSinceLastNotification < this.taskNotificationCooldown) {
+          const minutesRemaining = Math.ceil((this.taskNotificationCooldown - timeSinceLastNotification) / (60 * 1000));
+          console.log(`   ⏸️  Skipping task notification - cooldown active (${minutesRemaining} minutes remaining)`);
+          console.log(`   ℹ️  ${newTasks.length} new task(s) created but notification suppressed due to cooldown`);
+        } else {
+          console.log(`📤 Sending task notification for ${newTasks.length} newly created task(s)...`);
+          await this.sendTaskNotification(message, newTasks);
+          this.lastTaskNotificationTime.set(chatId, now);
+        }
+      } else {
+        if (tasks.length > 0 && newTasks.length === 0) {
+          console.log(`   ℹ️  Tasks were detected but none were new (all duplicates). Skipping notification.`);
+        } else if (createdTasks.length > 0 && newTasks.length === 0) {
+          console.log(`   ℹ️  Tasks were created but all were duplicates. Skipping notification.`);
+        }
       }
     } catch (error) {
       console.error('Error checking for tasks:', error);
@@ -798,77 +876,30 @@ IMPORTANT: Pay attention to the conversation history. Reference previous message
 
   async sendTaskNotification(message, tasks) {
     try {
-      // Build task list with schedule information
-      const taskList = tasks.map((task, idx) => {
-        const scheduleInfo = this.formatScheduleInfo(task);
-        let taskLine = `• ${task.title}`;
-        if (task.metadata?.teamName) {
-          taskLine += ` (${task.metadata.teamName})`;
-        }
-        taskLine += ` - ${scheduleInfo}`;
-        return taskLine;
-      }).join('\n');
-
-      // Generate a natural, human-like notification using LLM
-      const prompt = `You're texting a friend about tasks you just noted. Generate a natural, casual text message that:
-1. Acknowledges the task(s) that were just mentioned
-2. Lists what tasks you're tracking
-3. Mentions when you'll remind them
-
-Rules:
-- Be casual and friendly, like texting a friend
-- Don't use formal language like "Noted" or "I'll keep you updated"
-- Make it feel natural and conversational
-- Include the task list and when you'll remind them
-- Use emojis sparingly (maybe 1-2 if they fit naturally)
-- Keep it concise but informative (2-4 sentences)
-
-Task(s) you're tracking:
-${taskList}
-
-User's message that triggered this: "${message.text}"
-
-Generate a natural, casual text message that mentions the tasks and when you'll remind them:`;
-
-      const response = await this.openai.chat.completions.create({
-        model: this.model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a friendly person texting a friend. Generate natural, casual text messages that inform them about tasks you\'re tracking and when you\'ll remind them. Keep responses conversational but informative (2-4 sentences).'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.8,
-        max_tokens: 200
-      });
-
-      let notificationText = response.choices[0].message.content.trim();
+      // If multiple tasks, batch them into a single concise message
+      // Build a simple, short notification
+      let notificationText = '';
       
-      // Fallback if LLM response is too long or weird
-      if (!notificationText || notificationText.length > 500) {
-        // Fallback with task details
-        if (tasks.length === 1) {
-          const task = tasks[0];
-          const scheduleInfo = this.formatScheduleInfo(task);
-          if (task.category === 'sports' && task.metadata?.teamName) {
-            notificationText = `Got it! I'm tracking: ${task.title} (${task.metadata.teamName}). ${scheduleInfo} 🏆`;
-          } else if (task.category === 'goal') {
-            notificationText = `Sounds good! I'm tracking: ${task.title}. ${scheduleInfo} 💪`;
-          } else if (task.category === 'event') {
-            notificationText = `Got it! I'm tracking: ${task.title}. ${scheduleInfo} 📅`;
-          } else {
-            notificationText = `Sounds good! I'm tracking: ${task.title}. ${scheduleInfo} 👍`;
-          }
+      if (tasks.length === 1) {
+        // Single task - very short message
+        const task = tasks[0];
+        const scheduleInfo = this.formatScheduleInfo(task);
+        if (task.category === 'sports' && task.metadata?.teamName) {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 🏆`;
+        } else if (task.category === 'goal') {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 💪`;
+        } else if (task.category === 'event') {
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 📅`;
         } else {
-          // Multiple tasks - create a simple list
-          const taskTitles = tasks.map(t => `• ${t.title}`).join('\n');
-          notificationText = `Got it! I'm tracking these:\n${taskTitles}\n\nI'll remind you based on their schedules 👍`;
+          notificationText = `Got it! Tracking ${task.title}. ${scheduleInfo} 👍`;
         }
+      } else {
+        // Multiple tasks - very short batched message
+        notificationText = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
       }
+
+      // Use the simple notification text we built above
+      // No need for LLM generation - keep it simple and consistent
 
       console.log(`📤 Sending task creation notification to chat ${message.chatId}...`);
       console.log(`   Generated message: "${notificationText}"`);
@@ -883,23 +914,28 @@ Generate a natural, casual text message that mentions the tasks and when you'll 
 
       console.log(`✅ Task notification sent successfully!`);
       
+      // Update tracking
+      const chatId = String(message.chatId);
+      this.lastTaskNotificationTime.set(chatId, Date.now());
+      
       // Store the notification in conversation history
       const messageId = result?.data?.id || result?.id;
       await this.storeAIResponse(message.chatId, notificationText, messageId);
     } catch (error) {
       console.error('Error sending task notification:', error);
-      // Fallback to simple message with task details if LLM fails
+      // Fallback to simple message with task details if sending fails
       try {
         let fallbackMessage = '';
         if (tasks.length === 1) {
           const task = tasks[0];
           const scheduleInfo = this.formatScheduleInfo(task);
-          fallbackMessage = `Got it! I'm tracking: ${task.title}. ${scheduleInfo} 👍`;
+          fallbackMessage = `Got it! Tracking ${task.title}. ${scheduleInfo} 👍`;
         } else {
-          const taskTitles = tasks.map(t => `• ${t.title}`).join('\n');
-          fallbackMessage = `Got it! I'm tracking these:\n${taskTitles}\n\nI'll remind you based on their schedules 👍`;
+          fallbackMessage = `Got it! Tracking ${tasks.length} tasks. I'll remind you 👍`;
         }
         await this.apiClient.sendMessage(message.chatId, fallbackMessage, [], this.senderPhoneNumber);
+        // Update tracking even for fallback
+        this.lastTaskNotificationTime.set(String(message.chatId), Date.now());
       } catch (fallbackError) {
         console.error('Error sending fallback notification:', fallbackError);
       }
@@ -999,30 +1035,41 @@ Generate a natural, casual text message that mentions the tasks and when you'll 
       let recommendationsMessage = '';
       
       // Determine search type and perform search
-      if (triggerResult.triggerType === 'restaurant' || triggerResult.triggerType === 'food') {
-        // Search for restaurants
-        const restaurants = await this.googleSearchService.searchRestaurants(
-          enhancedQuery,
-          location
-        );
-        
-        recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
-          restaurants,
-          enhancedQuery,
-          preferences
-        );
-      } else {
-        // Search for general places/activities
-        const results = await this.googleSearchService.searchPlaces(
-          enhancedQuery,
-          location
-        );
-        
-        recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
-          results,
-          enhancedQuery,
-          preferences
-        );
+      try {
+        if (triggerResult.triggerType === 'restaurant' || triggerResult.triggerType === 'food') {
+          // Search for restaurants
+          const restaurants = await this.googleSearchService.searchRestaurants(
+            enhancedQuery,
+            location
+          );
+          
+          recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
+            restaurants,
+            enhancedQuery,
+            preferences
+          );
+        } else {
+          // Search for general places/activities
+          const results = await this.googleSearchService.searchPlaces(
+            enhancedQuery,
+            location
+          );
+          
+          recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
+            results,
+            enhancedQuery,
+            preferences
+          );
+        }
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('⚠️  Google Search rate limited. Skipping recommendations.');
+          recommendationsMessage = `I'd like to help you find ${enhancedQuery}, but I'm currently rate-limited on search. Try again in a bit! 🔍`;
+        } else {
+          // Re-throw other errors
+          throw error;
+        }
       }
 
       if (!recommendationsMessage) {
@@ -1135,11 +1182,11 @@ Generate a natural, casual text message that mentions the tasks and when you'll 
 
   async start() {
     console.log(`AI Response Service started for ${this.senderPhoneNumber}`);
-    console.log(`   Personality: Anime enthusiast, AI/tech lover, hackathon participant`);
+    console.log(`   Personality: Founder and investor focused`);
     console.log(`   Model: ${this.model}`);
-    console.log(`   Response strategy: Selective (only responds when needed)`);
+    console.log(`   Response strategy: NON-INVASIVE (only responds when explicitly asked)`);
     console.log(`   Min interval: ${this.minResponseInterval / 60000} minutes between responses`);
-    console.log(`   Confidence threshold: ${this.responseConfidenceThreshold}`);
+    console.log(`   Confidence threshold: ${this.responseConfidenceThreshold} (very high - agent rarely responds)`);
     console.log(`   Trigger detection: Enabled`);
     console.log(`   Google Search: ${this.googleSearchService.enabled ? 'Enabled' : 'Disabled'}`);
     
@@ -1194,7 +1241,7 @@ Generate a natural, casual text message that mentions the tasks and when you'll 
    */
   async shouldPerformGoogleSearch(message, conversationContext) {
     try {
-      const recentMessages = conversationContext.slice(-15); // Check last 15 messages for context
+      const recentMessages = conversationContext.slice(-5); // Check last 5 messages for context (reduced from 15)
       const conversationText = recentMessages.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -1317,57 +1364,53 @@ JSON Response:`;
       let recommendationsMessage = '';
 
       // Perform search based on type
-      switch (searchType) {
-        case 'restaurant':
-          results = await this.googleSearchService.searchRestaurants(searchQuery, location);
-          const preferences = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
-          recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
-            results,
-            searchQuery,
-            preferences
-          );
-          break;
-        
-        case 'sports_bar':
-          results = await this.googleSearchService.searchSportsBars(searchQuery, location);
-          if (results && results.length > 0) {
-            recommendationsMessage = `🏟️ Here are some places where you can watch:\n\n`;
-            results.forEach((venue, index) => {
-              recommendationsMessage += `${index + 1}. **${venue.name}**`;
-              if (venue.rating) {
-                const stars = '⭐'.repeat(Math.round(venue.rating));
-                recommendationsMessage += ` ${stars} (${venue.rating}/5)`;
-              }
-              recommendationsMessage += `\n`;
-              if (venue.address && venue.address !== 'Address not available') {
-                recommendationsMessage += `   📍 ${venue.address}\n`;
-              }
-              if (venue.snippet) {
-                const snippet = venue.snippet.length > 120 
-                  ? venue.snippet.substring(0, 120) + '...'
-                  : venue.snippet;
-                recommendationsMessage += `   ${snippet}\n`;
-              }
-              recommendationsMessage += `\n`;
-            });
-            recommendationsMessage += `Hope you find a great spot! 🎉`;
-          } else {
-            recommendationsMessage = `I couldn't find specific places for that. Try searching for "sports bars near me" or let me know your location! 🏟️`;
+      try {
+        switch (searchType) {
+          case 'restaurant': {
+            results = await this.googleSearchService.searchRestaurants(searchQuery, location);
+            const preferences = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatRestaurantRecommendations(
+              results,
+              searchQuery,
+              preferences
+            );
+            break;
           }
-          break;
-        
-        case 'place':
-        case 'event':
-        case 'general':
-        default:
-          results = await this.googleSearchService.searchPlaces(searchQuery, location);
-          const prefs = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
-          recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
-            results,
-            searchQuery,
-            prefs
-          );
-          break;
+          
+          case 'sports_bar': {
+            results = await this.googleSearchService.searchSportsBars(searchQuery, location);
+            const sportsBarPrefs = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatSportsBarRecommendations(
+              results,
+              searchQuery,
+              sportsBarPrefs
+            );
+            break;
+          }
+          
+          case 'place':
+          case 'event':
+          case 'general':
+          default: {
+            results = await this.googleSearchService.searchPlaces(searchQuery, location);
+            const placePrefs = this.extractUserPreferences(await this.getConversationContext(message.chatId, 50, true));
+            recommendationsMessage = this.googleSearchService.formatPlaceRecommendations(
+              results,
+              searchQuery,
+              placePrefs
+            );
+            break;
+          }
+        }
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('⚠️  Google Search rate limited. Skipping search results.');
+          recommendationsMessage = `I'd like to help you find ${searchQuery}, but I'm currently rate-limited on search. Try again in a bit! 🔍`;
+        } else {
+          // Re-throw other errors
+          throw error;
+        }
       }
 
       if (!recommendationsMessage || recommendationsMessage.trim().length === 0) {
@@ -1414,7 +1457,7 @@ JSON Response:`;
 
       console.log(`🎭 Checking if we should react to message ${message.messageId}...`);
 
-      const recentMessages = conversationContext.slice(-10); // Last 10 messages for context
+      const recentMessages = conversationContext.slice(-5); // Last 5 messages for context (reduced from 10)
       const conversationText = recentMessages.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -1547,8 +1590,8 @@ JSON Response:`;
       mentionedPlaces: []
     };
 
-    // Analyze last 50 messages for preferences
-    const historyToAnalyze = conversationHistory.slice(-50);
+    // Analyze last 20 messages for preferences (reduced from 50 to save tokens)
+    const historyToAnalyze = conversationHistory.slice(-20);
     
     // Common cuisine types (prioritize most recent mentions)
     const cuisineKeywords = [

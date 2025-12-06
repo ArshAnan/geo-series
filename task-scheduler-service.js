@@ -233,7 +233,17 @@ class TaskSchedulerService {
       }
 
       console.log(`   🔍 Searching for matches: "${searchQuery}"`);
-      const results = await this.googleSearchService.searchPlaces(searchQuery);
+      let results;
+      try {
+        results = await this.googleSearchService.searchPlaces(searchQuery);
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('   ⚠️  Google Search rate limited. Skipping match check.');
+          return false; // Can't check for match, so return false
+        }
+        throw error; // Re-throw other errors
+      }
       
       if (!results || results.length === 0) {
         return false;
@@ -281,7 +291,17 @@ class TaskSchedulerService {
       const today = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
       const searchQuery = `${teamName} match today ${today} schedule`;
       
-      const results = await this.googleSearchService.searchPlaces(searchQuery);
+      let results;
+      try {
+        results = await this.googleSearchService.searchPlaces(searchQuery);
+      } catch (error) {
+        // Handle rate limit errors gracefully
+        if (error.message && error.message.includes('Rate limited')) {
+          console.warn('   ⚠️  Google Search rate limited. Skipping match details.');
+          return null; // Can't get match details
+        }
+        throw error; // Re-throw other errors
+      }
       
       if (results && results.length > 0) {
         // Extract match details from first result
@@ -550,10 +570,14 @@ class TaskSchedulerService {
       console.warn('⚠️  API client not enabled. Reminders will be logged but not sent.');
     }
 
-    // Run initial check
-    this.checkAndSendReminders().catch(error => {
-      console.error('Error in initial task check:', error);
-    });
+    // Delay initial check to avoid Google searches on startup
+    // Wait 30 seconds before first check to let other services initialize
+    console.log('   Delaying initial check by 30 seconds to avoid startup Google searches...');
+    setTimeout(() => {
+      this.checkAndSendReminders().catch(error => {
+        console.error('Error in initial task check:', error);
+      });
+    }, 30000); // 30 second delay
 
     // Set up periodic checks
     this.checkIntervalId = setInterval(() => {

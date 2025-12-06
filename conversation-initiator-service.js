@@ -40,6 +40,13 @@ class ConversationInitiatorService {
     
     // Initialize Google Search Service for current events
     this.googleSearchService = new GoogleSearchService();
+    
+    // Rate limiting for Google Search API
+    this.lastGoogleSearchTime = 0;
+    this.googleSearchCooldown = 10 * 1000; // 10 seconds between searches
+    this.googleSearchRateLimitHit = false;
+    this.googleSearchRateLimitResetTime = 0;
+    this.googleSearchRateLimitResetDuration = 60 * 60 * 1000; // 1 hour cooldown if rate limited
   }
 
   /**
@@ -136,11 +143,16 @@ class ConversationInitiatorService {
         : '';
 
       const systemPrompt = `You are a friendly person who wants to start a natural conversation. 
-Generate a casual, engaging conversation starter (1-2 sentences max). 
-Be genuine, friendly, and not overly formal. Use emojis sparingly (maybe 1-2 if appropriate).
+The commonality between you and the other person is that you are both founders and investors. This is your primary connection point.
+Generate a casual, engaging conversation starter (1 sentence max, rarely 2 if absolutely necessary). 
+Be genuine, friendly, and not overly formal. Use emojis sparingly (maybe 1 if appropriate).
 The message should feel like a natural text message, not a formal email.
+CRITICAL: Keep it SHORT - one sentence is ideal. Be brief and conversational.
 
-IMPORTANT: Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.${groupChatInstruction}`;
+IMPORTANT: 
+- Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.
+- Focus on topics relevant to founders and investors - startups, funding, business, entrepreneurship, investments, etc.
+- Keep the conversation natural and don't force founder/investor topics if the conversation flows elsewhere.${groupChatInstruction}`;
 
       // Build conversation history context - only use the last 2-3 messages
       let historyContext = '';
@@ -167,7 +179,7 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.8,
-        max_tokens: 100
+        max_tokens: 80 // Keep generic starters very short
       });
 
       return response.choices[0].message.content.trim();
@@ -185,6 +197,154 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
   hasInitiatedToday(chatId) {
     // Disabled - allow unlimited initiations
     return false;
+  }
+
+  /**
+   * Check if the introduction message has been sent
+   * Checks for actual messages from the agent, not just records
+   */
+  async hasIntroductionBeenSent(chatId) {
+    try {
+      // First check if there are actual messages from the agent in the chat
+      await this.db.connect();
+      const messages = await this.db.getConversationsByChat(String(chatId), 100);
+      await this.db.disconnect();
+      
+      // Check if any message is from the sender (agent)
+      const hasAgentMessage = messages.some(msg => this.isFromSender(msg.fromPhone));
+      
+      if (!hasAgentMessage) {
+        console.log(`   📋 No messages from agent found in chat ${chatId} - introduction needed`);
+        return false;
+      }
+      
+      // Also check for introduction record to be sure
+      await this.db.connect();
+      const initiations = await this.db.getInitiationsByChat(String(chatId), 100);
+      await this.db.disconnect();
+      
+      const hasIntroductionRecord = initiations.some(init => init.interestDescription === 'introduction');
+      
+      if (hasAgentMessage && hasIntroductionRecord) {
+        console.log(`   ✅ Introduction already sent (found agent messages and introduction record for chat ${chatId})`);
+        return true;
+      }
+      
+      // If agent has sent messages but no introduction record, still consider it sent
+      if (hasAgentMessage) {
+        console.log(`   ✅ Agent has sent messages in chat ${chatId} - assuming introduction was sent`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error(`   ⚠️  Error checking introduction status:`, error.message);
+      // If we can't check, assume introduction was NOT sent to ensure we send it
+      return false;
+    }
+  }
+
+  /**
+   * Generate the introduction message introducing Rahul and Arsh
+   */
+  generateIntroductionMessage() {
+    return `Hey! 👋 I'm connecting you both here.
+
+Rahul is a startup founder working in the AI space, and is looking to raise funds for his startup.
+
+Arsh is a well-reputed investor in the space, and could be a potential investor for Rahul.
+
+I thought it would be great to connect you both! Feel free to take it from here. 🚀`;
+  }
+
+  /**
+   * Record that the introduction has been sent
+   */
+  async recordIntroduction(chatId, messageText) {
+    try {
+      await this.db.connect();
+      const initiation = {
+        chatId: String(chatId),
+        date: new Date().toISOString().split('T')[0],
+        interestDescription: 'introduction',
+        messageText: messageText,
+        initiatedAt: new Date().toISOString()
+      };
+      await this.db.recordInitiation(initiation);
+      await this.db.disconnect();
+      console.log(`   ✅ Recorded introduction for chat ${chatId}`);
+    } catch (error) {
+      console.error(`   ⚠️  Error recording introduction:`, error.message);
+    }
+  }
+
+  /**
+   * Get the introduction record for a chat
+   */
+  async getIntroductionRecord(chatId) {
+    try {
+      await this.db.connect();
+      const initiations = await this.db.getInitiationsByChat(String(chatId));
+      await this.db.disconnect();
+      
+      // Find the introduction record
+      const introduction = initiations.find(init => init.interestDescription === 'introduction');
+      return introduction || null;
+    } catch (error) {
+      console.error(`   ⚠️  Error getting introduction record:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Send introduction message immediately on startup (always sends)
+   */
+  async sendIntroductionIfNeeded() {
+    try {
+      // Only check the target chat ID if configured
+      if (!this.targetChatId) {
+        console.log('   No target chat ID configured. Skipping introduction.');
+        return;
+      }
+      
+      const targetChatId = String(this.targetChatId);
+      console.log(`   👋 Sending introduction message immediately on startup...`);
+      const introductionMessage = this.generateIntroductionMessage();
+      
+      if (this.apiClient.enabled) {
+        try {
+          console.log(`   📤 Sending introduction message to chat ${targetChatId}...`);
+          const result = await this.apiClient.sendMessage(
+            targetChatId,
+            introductionMessage,
+            [],
+            this.senderPhoneNumber
+          );
+          
+          const messageId = result?.data?.id || result?.id || result?.message_id || result?.chat_message?.id;
+          if (messageId) {
+            console.log(`   ✅ Introduction message sent successfully on startup (ID: ${messageId})`);
+            
+            // Record the introduction
+            await this.recordIntroduction(targetChatId, introductionMessage);
+          } else {
+            console.warn(`   ⚠️  Introduction message may not have been sent (no message ID in response)`);
+            // Still record it
+            await this.recordIntroduction(targetChatId, introductionMessage);
+          }
+        } catch (error) {
+          console.error(`   ❌ Error sending introduction message on startup:`, error);
+          // Still record it even if sending failed
+          await this.recordIntroduction(targetChatId, introductionMessage);
+        }
+      } else {
+        console.log(`   📝 Introduction message (API not enabled, would send):`);
+        console.log(`   "${introductionMessage}"`);
+        await this.recordIntroduction(targetChatId, introductionMessage);
+      }
+    } catch (error) {
+      console.error('Error in sendIntroductionIfNeeded:', error);
+    }
   }
 
   /**
@@ -249,6 +409,112 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
   }
 
   /**
+   * Get recent initiations to check for diversity
+   */
+  async getRecentInitiations(chatId, hoursAgo = 24) {
+    try {
+      const cutoffTime = Date.now() - (hoursAgo * 60 * 60 * 1000);
+      const today = new Date().toISOString().split('T')[0];
+      const initiations = await this.db.getInitiationsByChatAndDate(chatId, today);
+      
+      return initiations.filter(init => {
+        const initiatedTime = new Date(init.initiatedAt).getTime();
+        return initiatedTime > cutoffTime;
+      });
+    } catch (error) {
+      console.error('Error getting recent initiations:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Categorize an interest to help with diversity
+   */
+  categorizeInterest(interestDescription) {
+    const desc = interestDescription.toLowerCase();
+    
+    // Business/Startup category
+    if (desc.includes('startup') || desc.includes('business') || desc.includes('company') ||
+        desc.includes('venture') || desc.includes('entrepreneur') || desc.includes('founder')) {
+      return 'business';
+    }
+    
+    // Investment category
+    if (desc.includes('invest') || desc.includes('funding') || desc.includes('capital') ||
+        desc.includes('vc') || desc.includes('angel') || desc.includes('portfolio')) {
+      return 'investment';
+    }
+    
+    // Technology category
+    if (desc.includes('tech') || desc.includes('ai') || desc.includes('software') ||
+        desc.includes('product') || desc.includes('platform')) {
+      return 'technology';
+    }
+    
+    // Default to 'other'
+    return 'other';
+  }
+
+  /**
+   * Select a diverse interest from available shared interests
+   * Prioritizes interests that haven't been used recently
+   */
+  async selectDiverseInterest(sharedInterests, chatId) {
+    if (sharedInterests.length === 0) {
+      return null;
+    }
+
+    // Get recent initiations to see what we've been using
+    const recentInitiations = await this.getRecentInitiations(chatId, 24); // Last 24 hours
+    const recentCategories = recentInitiations.map(init => 
+      this.categorizeInterest(init.interestDescription)
+    );
+    
+    // Count category usage
+    const categoryCounts = {};
+    recentCategories.forEach(cat => {
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+    });
+    
+    console.log(`   📊 Recent initiation categories: ${JSON.stringify(categoryCounts)}`);
+    
+    // Categorize all available interests
+    const categorizedInterests = sharedInterests.map(interest => ({
+      interest,
+      category: this.categorizeInterest(interest.description),
+      confidence: interest.confidence || 0.5,
+      date: new Date(interest.extractedAt || interest.date).getTime()
+    }));
+    
+    // Score each interest based on:
+    // 1. Lower category usage = higher score (diversity bonus)
+    // 2. Higher confidence = higher score
+    // 3. More recent = higher score
+    // 4. Penalty for cricket/sports if sports have been used a lot
+    const scoredInterests = categorizedInterests.map(item => {
+      const categoryUsage = categoryCounts[item.category] || 0;
+      const diversityScore = 1 / (1 + categoryUsage); // Less used categories get higher score
+      
+      const score = diversityScore * item.confidence;
+      
+      return {
+        ...item,
+        score
+      };
+    });
+    
+    // Sort by score (highest first)
+    scoredInterests.sort((a, b) => b.score - a.score);
+    
+    console.log(`   🎯 Interest selection scores:`);
+    scoredInterests.slice(0, 3).forEach((item, idx) => {
+      console.log(`      ${idx + 1}. ${item.interest.description.substring(0, 50)} (${item.category}, score: ${item.score.toFixed(3)})`);
+    });
+    
+    return scoredInterests[0].interest;
+  }
+
+  /**
    * Record that we initiated a conversation
    */
   async recordInitiation(chatId, interestDescription, messageText) {
@@ -274,9 +540,33 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
 
   /**
    * Get current events related to a shared interest using web search
+   * Includes rate limiting to avoid hitting API limits
    */
   async getCurrentEventsForInterest(sharedInterest) {
     if (!this.googleSearchService.enabled) {
+      return null;
+    }
+
+    // Check if we're currently rate limited
+    const now = Date.now();
+    if (this.googleSearchRateLimitHit) {
+      if (now < this.googleSearchRateLimitResetTime) {
+        const minutesRemaining = Math.ceil((this.googleSearchRateLimitResetTime - now) / (60 * 1000));
+        console.log(`   ⏸️  Google Search API rate limited. Skipping search (cooldown: ${minutesRemaining} minutes remaining)`);
+        return null;
+      } else {
+        // Rate limit period has passed, reset
+        console.log(`   ✅ Google Search API rate limit cooldown expired. Resuming searches.`);
+        this.googleSearchRateLimitHit = false;
+        this.googleSearchRateLimitResetTime = 0;
+      }
+    }
+
+    // Check cooldown between searches
+    const timeSinceLastSearch = now - this.lastGoogleSearchTime;
+    if (timeSinceLastSearch < this.googleSearchCooldown) {
+      const secondsRemaining = Math.ceil((this.googleSearchCooldown - timeSinceLastSearch) / 1000);
+      console.log(`   ⏸️  Google Search cooldown active. Skipping search (${secondsRemaining}s remaining)`);
       return null;
     }
 
@@ -284,45 +574,24 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
       // Extract keywords from the shared interest description
       const interestText = sharedInterest.description.toLowerCase();
       
-      // Determine if this is a sport/team interest
-      const sportsKeywords = ['soccer', 'football', 'basketball', 'baseball', 'hockey', 'tennis', 'golf', 'nfl', 'nba', 'mlb', 'nhl', 'premier league', 'champions league', 'world cup', 'olympics'];
-      const isSportInterest = sportsKeywords.some(keyword => interestText.includes(keyword));
-      
-      if (!isSportInterest) {
-        // For non-sports interests, we'll let OpenAI handle it with current date context
-        return null;
-      }
-
-      // Build search query for current events
-      let searchQuery = '';
-      if (interestText.includes('soccer') || interestText.includes('football')) {
-        searchQuery = 'soccer games today live scores';
-      } else if (interestText.includes('basketball')) {
-        searchQuery = 'NBA games today live scores';
-      } else if (interestText.includes('baseball')) {
-        searchQuery = 'MLB games today live scores';
-      } else if (interestText.includes('hockey')) {
-        searchQuery = 'NHL games today live scores';
-      } else {
-        // Generic sports search
-        searchQuery = `${interestText} games today live`;
-      }
-
-      console.log(`   🔍 Searching for current events: "${searchQuery}"`);
-      const results = await this.googleSearchService.searchPlaces(searchQuery);
-      
-      if (results && results.length > 0) {
-        // Extract relevant information from search results
-        const currentEvents = results.slice(0, 3).map(result => ({
-          title: result.title,
-          snippet: result.snippet
-        }));
-        return currentEvents;
-      }
-      
+      // For founder/investor focused interests, we'll let OpenAI handle it with current date context
+      // This reduces API calls and keeps things simple
       return null;
     } catch (error) {
+      // Check if it's a rate limit error (429)
+      if (error.response && error.response.status === 429) {
+        console.warn('   ⚠️  Google Search API rate limit hit (429). Enabling cooldown period.');
+        this.googleSearchRateLimitHit = true;
+        this.googleSearchRateLimitResetTime = now + this.googleSearchRateLimitResetDuration;
+        console.warn(`   ⏸️  Google Search API disabled for ${this.googleSearchRateLimitResetDuration / (60 * 1000)} minutes`);
+        return null;
+      }
+      
+      // For other errors, log and continue
       console.warn('   ⚠️  Error searching for current events:', error.message);
+      if (error.response) {
+        console.warn(`      Status: ${error.response.status}, StatusText: ${error.response.statusText}`);
+      }
       return null;
     }
   }
@@ -392,85 +661,9 @@ or mention something light and friendly. Keep it casual and warm.${historyContex
   /**
    * Generate a natural conversation starter based on shared interest
    */
-  async generateConversationStarter(sharedInterest, conversationHistory = [], isGroupChat = false) {
-    try {
-      // Get current date and time
-      const now = new Date();
-      const currentDate = now.toLocaleDateString('en-US', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric' 
-      });
-      const currentTime = now.toLocaleTimeString('en-US', { 
-        hour: '2-digit', 
-        minute: '2-digit',
-        timeZoneName: 'short'
-      });
-
-      // Try to get current events related to the interest
-      const currentEvents = await this.getCurrentEventsForInterest(sharedInterest);
-      
-      const groupChatInstruction = isGroupChat 
-        ? `\n\nCRITICAL: This is a GROUP CHAT with multiple participants. Address BOTH (or ALL) participants in your message. Use "you both", "you all", or ask questions that engage everyone. Make sure the conversation starter is inclusive and addresses the group, not just one person.`
-        : '';
-      
-      const systemPrompt = `You are a friendly person who wants to start a natural conversation with someone you share interests with. 
-Generate a casual, engaging conversation starter (1-2 sentences max) based on a shared interest. 
-Be genuine, friendly, and not overly formal. Use emojis sparingly (maybe 1-2 if appropriate).
-The message should feel like a natural text message, not a formal email.
-
-IMPORTANT: 
-- If the shared interest is related to sports, entertainment, or current events, reference what's happening RIGHT NOW (today's games, current events, recent news, etc.) when relevant.
-- Consider the conversation history - reference previous topics, continue threads, or build on what was discussed before.
-- Make it timely and relevant to the current moment and the relationship context.${groupChatInstruction}`;
-
-      // Build conversation history context - only use the last 2-3 messages
-      let historyContext = '';
-      if (conversationHistory && conversationHistory.length > 0) {
-        const recentHistory = conversationHistory.slice(-3); // Last 3 messages for context
-        historyContext = `\n\nPrevious Conversation Context (most recent messages):
-${recentHistory.map((msg, idx) => {
-          const role = msg.isFromSender ? 'You' : 'Them';
-          const time = new Date(msg.sentAt).toLocaleString();
-          return `${role} (${time}): ${msg.text}`;
-        }).join('\n')}
-
-Use this conversation history to make your starter more relevant. You can reference previous topics, continue a discussion, or build on what was talked about before.`;
-      }
-
-      let userPrompt = `Generate a conversation starter based on this shared interest:
-${sharedInterest.description}
-
-Context: ${sharedInterest.context || 'No additional context'}
-
-Current Date and Time: ${currentDate} at ${currentTime}${historyContext}`;
-
-      if (currentEvents && currentEvents.length > 0) {
-        userPrompt += `\n\nCurrent Events/News Related to This Interest:
-${currentEvents.map((event, idx) => `${idx + 1}. ${event.title}: ${event.snippet}`).join('\n')}
-
-Use this current information to make your conversation starter timely and relevant. Reference specific games, events, or news if appropriate.`;
-      } else {
-        userPrompt += `\n\nTry to reference what's happening right now related to this interest (current games, events, news, etc.) if it's relevant. Make it timely and engaging.`;
-      }
-
-      const response = await this.openai.chat.completions.create({
-        model: this.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.8,
-        max_tokens: 150 // Increased slightly for more context
-      });
-
-      return response.choices[0].message.content.trim();
-    } catch (error) {
-      console.error('Error generating conversation starter:', error);
-      // Fallback to a simple message
-      return `Hey! I was thinking about ${sharedInterest.description.toLowerCase()}. Want to chat about it?`;
-    }
+  async generateConversationStarter(sharedInterest, conversationHistory = [], isGroupChat = false, chatId = null) {
+    // Hardcoded message for now
+    return "looks like you guys did not connect, can you connect sometime next week?";
   }
 
   /**
@@ -545,6 +738,71 @@ Use this current information to make your conversation starter timely and releva
           
           console.log(`   ✅ Chat ${chatId}: Inactive for ${this.minInactivityMinutes}+ minutes`);
           
+          // Check if introduction has been sent (check if agent has sent the introduction message specifically)
+          const hasIntroductionBeenSent = await this.hasIntroductionBeenSent(chatId);
+          
+          if (!hasIntroductionBeenSent) {
+            // Send introduction message first - this is the FIRST message ever
+            console.log(`   👋 Chat ${chatId}: Sending introduction message (FIRST MESSAGE - introducing Rahul and Arsh)`);
+            const introductionMessage = this.generateIntroductionMessage();
+            
+            if (this.apiClient.enabled) {
+              try {
+                console.log(`   📤 Sending introduction message to chat ${chatId}...`);
+                const result = await this.apiClient.sendMessage(
+                  chatId,
+                  introductionMessage,
+                  [],
+                  this.senderPhoneNumber
+                );
+                
+                const messageId = result?.data?.id || result?.id || result?.message_id || result?.chat_message?.id;
+                if (messageId) {
+                  console.log(`   ✅ Introduction message sent successfully (ID: ${messageId})`);
+                  
+                  // Record the introduction
+                  await this.recordIntroduction(chatId, introductionMessage);
+                  
+                  // IMPORTANT: Don't send regular conversation starter immediately
+                  // Wait for the next check cycle after the inactivity period
+                  console.log(`   ⏸️  Introduction sent. Regular conversation starters will begin after ${this.minInactivityMinutes} minutes of inactivity from now.`);
+                  initiatedCount++;
+                  continue; // Skip regular conversation starter - introduction is the first message
+                } else {
+                  console.warn(`   ⚠️  Introduction message may not have been sent (no message ID in response)`);
+                  // Still record it
+                  await this.recordIntroduction(chatId, introductionMessage);
+                  continue;
+                }
+              } catch (error) {
+                console.error(`   ❌ Error sending introduction message:`, error);
+                // Still record it even if sending failed
+                await this.recordIntroduction(chatId, introductionMessage);
+                continue;
+              }
+            } else {
+              console.log(`   📝 Introduction message (API not enabled, would send):`);
+              console.log(`   "${introductionMessage}"`);
+              await this.recordIntroduction(chatId, introductionMessage);
+              initiatedCount++;
+            }
+            continue; // Skip regular conversation starter - introduction must be sent first
+          }
+          
+          // If we get here, introduction has been sent
+          // Now check if enough time has passed since introduction to send regular starters
+          const introductionRecord = await this.getIntroductionRecord(chatId);
+          if (introductionRecord) {
+            const introductionTime = new Date(introductionRecord.initiatedAt).getTime();
+            const now = Date.now();
+            const minutesSinceIntroduction = (now - introductionTime) / (1000 * 60);
+            
+            if (minutesSinceIntroduction < this.minInactivityMinutes) {
+              console.log(`   ⏸️  Chat ${chatId}: Introduction was sent ${minutesSinceIntroduction.toFixed(1)} minutes ago. Waiting ${(this.minInactivityMinutes - minutesSinceIntroduction).toFixed(1)} more minutes before sending regular conversation starters.`);
+              continue; // Wait for the inactivity period after introduction
+            }
+          }
+          
           // Get conversation history for context - only last 2-3 messages from MongoDB
           // Get latest messages directly from MongoDB for better reliability
           const latestMessages = await this.db.getLatestMessagesByChat(String(chatId), 3);
@@ -582,15 +840,13 @@ Use this current information to make your conversation starter timely and releva
           let interestDescription = 'generic_starter';
           
           if (sharedInterests.length > 0) {
-            // Pick the most recent or highest confidence shared interest
-            const interest = sharedInterests
-              .sort((a, b) => {
-                // Prefer higher confidence, then more recent
-                if (b.confidence !== a.confidence) {
-                  return b.confidence - a.confidence;
-                }
-                return new Date(b.extractedAt || b.date).getTime() - new Date(a.extractedAt || a.date).getTime();
-              })[0];
+            // Use diversity-aware interest selection to avoid repeating the same topics
+            const interest = await this.selectDiverseInterest(sharedInterests, chatId);
+            
+            if (!interest) {
+              console.log(`   ⏭️  Chat ${chatId}: No suitable interest selected after diversity filtering`);
+              continue;
+            }
             
           // Check if we've already initiated about this specific interest recently (within last hour)
           // This prevents spamming the same interest, but allows different interests
@@ -605,7 +861,7 @@ Use this current information to make your conversation starter timely and releva
             // Generate conversation starter based on shared interest with conversation history
             console.log(`   💭 Generating conversation starter for chat ${chatId}...`);
             console.log(`      Shared interest: ${interest.description}`);
-            messageText = await this.generateConversationStarter(interest, conversationHistory, isGroupChat);
+            messageText = await this.generateConversationStarter(interest, conversationHistory, isGroupChat, chatId);
             interestDescription = interest.description;
           } else {
             // No shared interests - use generic starter with conversation history
@@ -704,18 +960,22 @@ Use this current information to make your conversation starter timely and releva
     console.log(`   Frequency: Unlimited (initiates whenever inactive for ${this.minInactivityMinutes}+ minutes)`);
     console.log(`   Duplicate prevention: Same interest blocked for 1 hour`);
     console.log(`   Current events: ${this.googleSearchService.enabled ? 'Enabled (will reference live games/events)' : 'Disabled (will use date context only)'}`);
+    if (this.googleSearchService.enabled) {
+      console.log(`   Google Search rate limiting: ${this.googleSearchCooldown / 1000}s cooldown between searches`);
+      console.log(`   Rate limit protection: ${this.googleSearchRateLimitResetDuration / (60 * 1000)} minute cooldown if 429 error occurs`);
+    }
     
     if (!this.apiClient.enabled) {
       console.warn('⚠️  API client not enabled. Conversation initiations will be logged but not sent.');
     }
     
-    // Run initial check immediately on startup
-    console.log('   Running initial check now...');
-    this.checkAndInitiate().catch(error => {
-      console.error('Error in initial conversation initiator check:', error);
+    // Send introduction message immediately on startup if not sent yet
+    console.log('   Checking if introduction message needs to be sent...');
+    this.sendIntroductionIfNeeded().catch(error => {
+      console.error('Error sending introduction message on startup:', error);
     });
     
-    // Set up periodic checks
+    // Set up periodic checks (conversation starters will only trigger after minInactivityMinutes)
     this.checkIntervalId = setInterval(() => {
       this.checkAndInitiate().catch(error => {
         console.error('Error in periodic conversation initiator check:', error);

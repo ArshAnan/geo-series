@@ -30,8 +30,8 @@ class TriggerDetector {
    */
   async detectTriggers(conversationHistory, recentMessage, pastRecommendations = []) {
     try {
-      // Use more conversation history (last 50 messages) to better understand context and preferences
-      const recentHistory = conversationHistory.slice(-50);
+      // Use minimal conversation history to save tokens (last 10 messages, reduced from 50)
+      const recentHistory = conversationHistory.slice(-10);
       const conversationText = recentHistory.map(msg => {
         const role = msg.role === 'assistant' ? 'Agent' : 'User';
         return `${role}: ${msg.content}`;
@@ -269,8 +269,8 @@ JSON Response:`;
       mentionedPlaces: []
     };
 
-    // Analyze last 100 messages for preferences
-    const historyToAnalyze = conversationHistory.slice(-100);
+    // Analyze last 20 messages for preferences (reduced from 100 to save tokens)
+    const historyToAnalyze = conversationHistory.slice(-20);
     
     // Common cuisine types
     const cuisineKeywords = [

@@ -142,6 +142,12 @@ class NotificationService {
       // Send only UNSENT moments in a single message
       const summary = this.formatSummary(unsentMoments, chatId);
       
+      // Only send if there are major moments to share
+      if (!summary) {
+        console.log(`   ℹ️  No major moments to share (filtered out trivial moments)`);
+        return;
+      }
+      
       // Send to user via API
       if (this.apiClient.enabled) {
         await this.sendMessageToUser(chatId, summary);
@@ -172,55 +178,92 @@ class NotificationService {
 
   /**
    * Format key moments into a readable summary
+   * Show major moments with day/time and actual messages to make it personal
    */
   formatSummary(moments, chatId) {
     if (!moments || moments.length === 0) {
-      return `📝 Key Moments from Your Conversation\n\nNo key moments have been detected yet.`;
+      return null; // Don't send if no moments
     }
 
-    const momentTypeLabels = {
-      'first_contact': '👋 First Connection',
-      'shared_interest': '🎯 Shared Interest',
-      'important_date': '📅 Important Date',
-      'milestone': '⭐ Milestone',
-      'preference': '💭 Preference'
-    };
+    // Filter to only major moments (higher confidence, important types)
+    // Focus on milestones, shared interests, important dates - skip trivial preferences
+    const majorMoments = moments
+      .filter(moment => {
+        if (!moment || !moment.type) return false;
+        // Only include major moment types
+        const majorTypes = ['milestone', 'shared_interest', 'important_date', 'first_contact'];
+        if (!majorTypes.includes(moment.type)) return false;
+        // Require higher confidence for major moments (0.5+)
+        const confidence = moment.confidence || 0.3;
+        return confidence >= 0.5;
+      })
+      .sort((a, b) => {
+        // Sort by confidence (highest first), then by date (most recent first)
+        const confDiff = (b.confidence || 0.3) - (a.confidence || 0.3);
+        if (confDiff !== 0) return confDiff;
+        const dateA = new Date(a.date || a.extractedAt || 0).getTime();
+        const dateB = new Date(b.date || b.extractedAt || 0).getTime();
+        return dateB - dateA;
+      })
+      .slice(0, 3); // Only show top 3 major moments
 
-    let summary = `📝 Key Moments from Your Conversation\n\n`;
-    
-    // Group by type
-    const grouped = moments.reduce((acc, moment) => {
-      if (!moment || !moment.type) {
-        return acc; // Skip invalid moments
-      }
-      if (!acc[moment.type]) {
-        acc[moment.type] = [];
-      }
-      acc[moment.type].push(moment);
-      return acc;
-    }, {});
+    if (majorMoments.length === 0) {
+      return null; // No major moments to share
+    }
 
-    // Format each group
-    Object.entries(grouped).forEach(([type, typeMoments]) => {
-      const label = momentTypeLabels[type] || type;
-      summary += `${label}:\n`;
+    // Format each moment with date/time and context
+    const formattedMoments = majorMoments.map(moment => {
+      // Format date/time in a friendly way
+      let dateTimeStr = '';
+      const momentDate = moment.date || moment.extractedAt;
+      if (momentDate) {
+        try {
+          const date = new Date(momentDate);
+          const now = new Date();
+          const daysDiff = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+          
+          if (daysDiff === 0) {
+            // Today - show time
+            dateTimeStr = `Today at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else if (daysDiff === 1) {
+            dateTimeStr = `Yesterday at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else if (daysDiff < 7) {
+            dateTimeStr = `${date.toLocaleDateString('en-US', { weekday: 'short' })} at ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+          } else {
+            dateTimeStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          }
+        } catch (e) {
+          // If date parsing fails, skip it
+        }
+      }
+
+      // Get the actual message/context to make it personal
+      const context = moment.context || '';
+      const description = moment.description || 'Something happened';
       
-      typeMoments.forEach(moment => {
-        summary += `  • ${moment.description || 'Unknown moment'}`;
-        if (moment.context) {
-          summary += `\n    "${moment.context}"`;
-        }
-        if (moment.date) {
-          summary += `\n    📅 ${moment.date}`;
-        }
-        summary += `\n`;
-      });
-      summary += `\n`;
+      // Build the moment line
+      let momentLine = description;
+      if (context && context.length > 0 && context.length < 100) {
+        // Include context if it's short and meaningful
+        momentLine += ` "${context}"`;
+      }
+      if (dateTimeStr) {
+        momentLine += ` (${dateTimeStr})`;
+      }
+      
+      return momentLine;
     });
 
-    summary += `\n💡 These moments were automatically detected from your conversation.`;
-
-    return summary;
+    // Build the message - keep it personal and concise
+    if (formattedMoments.length === 1) {
+      return `Hey! I noticed: ${formattedMoments[0]}`;
+    } else {
+      let message = `Hey! Here are some moments I noticed:\n\n`;
+      formattedMoments.forEach((moment, idx) => {
+        message += `${idx + 1}. ${moment}\n`;
+      });
+      return message.trim();
+    }
   }
 
   /**

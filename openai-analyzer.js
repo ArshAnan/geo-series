@@ -2,6 +2,7 @@
 require('dotenv').config();
 const OpenAI = require('openai');
 const SeriesAPIClient = require('./api-client');
+const DatabaseService = require('./database-service');
 const config = require('./config.json');
 
 class OpenAIAnalyzer {
@@ -16,6 +17,7 @@ class OpenAIAnalyzer {
 
     this.model = config.openaiModel || 'gpt-4o';
     this.apiClient = new SeriesAPIClient();
+    this.db = new DatabaseService(); // Add database service to fetch recent messages
     this.targetChatId = targetChatId || config.chatId;
     this.processedBatches = new Set(); // Track processed batches to avoid duplicates
     this.onMomentExtractedCallback = null; // Callback for extracted moments
@@ -196,51 +198,96 @@ Return ONLY valid JSON, no other text. Format:
       console.log(`🔍 Analyzing conversation for key moments (chat ${conversationBatch.chatId})...`);
       console.log(`   Messages in batch: ${conversationBatch.messages.length}`);
 
-      // Fetch ALL chat history from API for comprehensive key moment analysis
+      // Fetch recent messages from MongoDB to ensure we include the latest messages
       let allMessages = conversationBatch.messages;
-      if (this.apiClient.enabled && this.targetChatId && String(conversationBatch.chatId) === String(this.targetChatId)) {
-        try {
-          console.log(`   📥 Fetching ALL chat history from API for comprehensive key moment analysis...`);
-          const messagesResponse = await this.apiClient.getChatMessages(conversationBatch.chatId, null, 25, false, true);
-          const apiMessages = messagesResponse?.data || messagesResponse || [];
+      try {
+        // First, try to get recent messages from MongoDB (most reliable and up-to-date)
+        if (this.db) {
+          await this.db.connect();
+          const recentDbMessages = await this.db.getConversationsByChat(conversationBatch.chatId, 100); // Get last 100 messages
+          await this.db.disconnect();
           
-          if (Array.isArray(apiMessages) && apiMessages.length > 0) {
-            // Convert API messages to batch format
-            const apiMessagesFormatted = apiMessages.map(msg => ({
+          if (Array.isArray(recentDbMessages) && recentDbMessages.length > 0) {
+            // Convert MongoDB messages to batch format
+            const dbMessagesFormatted = recentDbMessages.map(msg => ({
               chatId: conversationBatch.chatId,
-              messageId: String(msg.id || msg.message_id),
-              fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
+              messageId: String(msg.messageId || msg.id),
+              fromPhone: msg.fromPhone,
               text: msg.text || '',
-              sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
-              chatHandles: msg.chat_handles || [],
+              sentAt: msg.sentAt,
+              chatHandles: msg.chatHandles || [],
               attachments: msg.attachments || [],
-              isRead: msg.is_read || false,
+              isRead: msg.isRead || false,
               service: msg.service || 'iMessage'
             }));
 
-            // Combine batch messages with API messages, avoiding duplicates
+            // Combine batch messages with MongoDB messages, avoiding duplicates
             const batchMessageIds = new Set(conversationBatch.messages.map(m => m.messageId));
-            const uniqueApiMessages = apiMessagesFormatted.filter(m => !batchMessageIds.has(m.messageId));
+            const uniqueDbMessages = dbMessagesFormatted.filter(m => !batchMessageIds.has(m.messageId));
             
-            // Merge and sort by timestamp
-            allMessages = [...conversationBatch.messages, ...uniqueApiMessages]
+            // Merge and sort by timestamp (most recent first, then reverse to chronological)
+            allMessages = [...conversationBatch.messages, ...uniqueDbMessages]
               .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
             
-            console.log(`   ✅ Using ${allMessages.length} total messages for key moment analysis (${conversationBatch.messages.length} from batch + ${uniqueApiMessages.length} from full history)`);
+            console.log(`   ✅ Using ${allMessages.length} total messages for key moment analysis (${conversationBatch.messages.length} from batch + ${uniqueDbMessages.length} from MongoDB - includes recent messages)`);
           }
-        } catch (error) {
-          console.warn(`   ⚠️  Error fetching full chat history, using batch only:`, error.message);
+        }
+      } catch (error) {
+        console.warn(`   ⚠️  Error fetching recent messages from MongoDB, using batch only:`, error.message);
+        // Fallback to API if MongoDB fails
+        if (this.apiClient.enabled && this.targetChatId && String(conversationBatch.chatId) === String(this.targetChatId)) {
+          try {
+            console.log(`   📥 Fallback: Fetching recent messages from API...`);
+            const messagesResponse = await this.apiClient.getChatMessages(conversationBatch.chatId, null, 100, false, true); // Increased from 25 to 100
+            const apiMessages = messagesResponse?.data || messagesResponse || [];
+            
+            if (Array.isArray(apiMessages) && apiMessages.length > 0) {
+              // Convert API messages to batch format
+              const apiMessagesFormatted = apiMessages.map(msg => ({
+                chatId: conversationBatch.chatId,
+                messageId: String(msg.id || msg.message_id),
+                fromPhone: msg.sent_from || msg.from_phone || msg.fromPhone,
+                text: msg.text || '',
+                sentAt: msg.sent_at || msg.sentAt || msg.timestamp,
+                chatHandles: msg.chat_handles || [],
+                attachments: msg.attachments || [],
+                isRead: msg.is_read || false,
+                service: msg.service || 'iMessage'
+              }));
+
+              // Combine batch messages with API messages, avoiding duplicates
+              const batchMessageIds = new Set(conversationBatch.messages.map(m => m.messageId));
+              const uniqueApiMessages = apiMessagesFormatted.filter(m => !batchMessageIds.has(m.messageId));
+              
+              // Merge and sort by timestamp
+              allMessages = [...conversationBatch.messages, ...uniqueApiMessages]
+                .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+              
+              console.log(`   ✅ Using ${allMessages.length} total messages for key moment analysis (${conversationBatch.messages.length} from batch + ${uniqueApiMessages.length} from API)`);
+            }
+          } catch (apiError) {
+            console.warn(`   ⚠️  Error fetching from API as well, using batch only:`, apiError.message);
+          }
         }
       }
 
-      // Create enhanced batch with all messages
+      // Prioritize recent messages - take the most recent 50 messages to ensure recent ones are included
+      // This ensures we capture key moments from recent conversations while keeping token usage reasonable
+      const recentMessages = allMessages.length > 50 
+        ? allMessages.slice(-50) // Take last 50 messages (most recent)
+        : allMessages; // Use all if less than 50
+      
+      console.log(`   📊 Analyzing ${recentMessages.length} messages (prioritizing most recent ${Math.min(50, allMessages.length)} messages)`);
+      console.log(`   📅 Message time range: ${recentMessages[0]?.sentAt} to ${recentMessages[recentMessages.length - 1]?.sentAt}`);
+
+      // Create enhanced batch with recent messages prioritized
       const enhancedBatch = {
         ...conversationBatch,
-        messages: allMessages,
-        messageCount: allMessages.length,
+        messages: recentMessages,
+        messageCount: recentMessages.length,
         timeRange: {
-          start: allMessages.length > 0 ? allMessages[0].sentAt : conversationBatch.timeRange.start,
-          end: allMessages.length > 0 ? allMessages[allMessages.length - 1].sentAt : conversationBatch.timeRange.end
+          start: recentMessages.length > 0 ? recentMessages[0].sentAt : conversationBatch.timeRange.start,
+          end: recentMessages.length > 0 ? recentMessages[recentMessages.length - 1].sentAt : conversationBatch.timeRange.end
         }
       };
 

@@ -58,16 +58,16 @@ class TaskAnalyzerService {
       .map(m => `- ${m.type}: ${m.description}`)
       .join('\n');
 
-    return `Analyze the following conversation and identify tasks, goals, and scheduled events that should be tracked with reminders.
+    return `Analyze the following RECENT conversation messages and identify tasks, goals, and scheduled events that should be tracked with reminders.
 
-IMPORTANT: Be PROACTIVE and LENIENT - create tasks even from single mentions, questions, or casual discussions. It's better to create a task than miss one.
+IMPORTANT: Only create tasks from the RECENT messages provided above. Do NOT create tasks based on old key moments or historical context. Be selective - only create tasks that are clearly mentioned in the recent conversation.
 
 Conversation:
 ${messages}
 
 ${relevantMoments ? `\nRelevant Context from Previous Analysis:\n${relevantMoments}` : ''}
 
-Please identify and extract the following types of tasks/goals (be generous - even a single mention counts):
+Please identify and extract the following types of tasks/goals from the RECENT conversation messages ONLY (not from old key moments):
 
 1. **Sports Tasks** - ANY mention of teams, sports, matches, games
    - Examples: 
@@ -76,7 +76,7 @@ Please identify and extract the following types of tasks/goals (be generous - ev
      * "They like watching NBA games" → Create game reminder task
      * "I'm a Lakers fan" → Create matchday reminder task
    - Extract: team name, sport type, preference for matchday reminders
-   - Even if it's just a question or single mention, create a task!
+   - Only create if explicitly mentioned in recent messages
 
 2. **Goal Tasks** - ANY mention of shared goals, fitness, personal development
    - Examples:
@@ -99,7 +99,14 @@ Please identify and extract the following types of tasks/goals (be generous - ev
      * "We have a meeting tomorrow" → Create reminder task
    - Extract: event name, date, reminder schedule
 
-CRITICAL: If you see ANY mention of sports teams, goals, activities, or events - CREATE A TASK. Even if it's just a question or casual mention. Be generous with confidence scores (0.3+ is acceptable).
+CRITICAL: Only create tasks for things mentioned in the RECENT conversation messages provided above. Do NOT create tasks based on old key moments or historical context - only what's in the current conversation batch.
+
+Only create a task if:
+- It's explicitly mentioned in the recent messages (last few messages)
+- It's a clear, actionable task or goal
+- It's not already a task that exists
+
+Be selective - don't create duplicate tasks or tasks from old conversations. Only create tasks from the recent messages in this conversation batch.
 
 Return your analysis as a JSON array of task objects. Each task should have:
 - category: one of "sports", "goal", "common_interest", "event"
@@ -121,7 +128,7 @@ Return your analysis as a JSON array of task objects. Each task should have:
   - activityType: For common interest tasks
   - eventName: For event tasks
 - context: Relevant conversation context or quote
-- confidence: Your confidence level (0.0 to 1.0) - can be as low as 0.3
+- confidence: Your confidence level (0.0 to 1.0) - should be 0.7+ for tasks from recent messages only
 - chatId: The chat ID where this was discussed
 
 Return ONLY valid JSON, no other text. Format:
@@ -159,7 +166,7 @@ Return ONLY valid JSON, no other text. Format:
         messages: [
           {
             role: 'system',
-            content: 'You are an expert at analyzing conversations to extract tasks, goals, and scheduled events. Be PROACTIVE and LENIENT - create tasks from any mention of sports teams, goals, activities, or events, even if it\'s just a question or casual mention. Always respond with a valid JSON array of task objects, even if empty. If no tasks are found, return an empty array [].'
+            content: 'You are an expert at analyzing conversations to extract tasks, goals, and scheduled events. Only create tasks from the RECENT messages provided - do NOT create tasks based on old key moments or historical context. Be selective and only create tasks that are clearly mentioned in the recent conversation messages. Always respond with a valid JSON array of task objects, even if empty. If no tasks are found, return an empty array [].'
           },
           {
             role: 'user',
